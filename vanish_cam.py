@@ -24,13 +24,13 @@ try:
         EFFECT_SECONDS, joined_hands_from_landmarks, landed_log_anchor,
         load_log, overlay_log, render_substitution, substitution_anchor,
     )
-    from .vanish_sound import VanishSound
+    from .vanish_sound import SOUND_PATH, VanishSound
 except ImportError:
     from naruto_effect import (
         EFFECT_SECONDS, joined_hands_from_landmarks, landed_log_anchor,
         load_log, overlay_log, render_substitution, substitution_anchor,
     )
-    from vanish_sound import VanishSound
+    from vanish_sound import SOUND_PATH, VanishSound
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -106,6 +106,7 @@ def parse_args() -> argparse.Namespace:
         "--gesture-debug", action="store_true",
         help="Stampa nel terminale lo stato del riconoscimento (senza scritte nel video)",
     )
+    parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -604,8 +605,28 @@ def set_fullscreen(enabled: bool) -> None:
     cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, mode)
 
 
+def self_test() -> int:
+    """Check bundled resources and model initialization without opening a webcam."""
+    required = (SEGMENTER_MODEL, GESTURE_MODEL, HAND_MODEL, SOUND_PATH)
+    missing = [path.name for path in required if not path.is_file()]
+    if missing:
+        raise RuntimeError(f"Risorse mancanti: {', '.join(missing)}")
+    load_log()
+    import pygame.mixer  # The distributed build must contain its MP3 decoder.
+    for mode in ("normal", "naruto"):
+        segmenter, recognizer = create_tasks(mode)
+        try:
+            recognizer.close()
+        finally:
+            segmenter.close()
+    print("[Webcam] Self-test completato: modelli, asset e audio presenti.")
+    return 0
+
+
 def run() -> int:
     args = parse_args()
+    if getattr(args, "self_test", False):
+        return self_test()
     mode = args.mode or choose_mode()
     if mode is None:
         return 0

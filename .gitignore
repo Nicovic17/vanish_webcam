@@ -5,3 +5,6 @@ __pycache__/
 .venv-local/
 models/
 *.part
+/build/
+/dist/*
+!/dist/VanishCam.exe

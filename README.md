@@ -12,6 +12,31 @@ e l'effetto, senza menu, istruzioni o altre scritte sovrapposte.
 3. Esci dall'inquadratura per 4 secondi, mentre viene acquisito lo sfondo.
    Il terminale segnala quando puoi rientrare.
 
+## Creare l'eseguibile Windows
+
+Sul PC usato per la build, installa Python 3 e fai doppio clic su
+`BUILD_WINDOWS.bat`. Lo script installa le dipendenze mancanti, raccoglie i
+modelli MediaPipe e crea `dist\VanishCam.exe`. Avvia anche un self-test senza
+aprire la webcam. Per ricompilare dopo modifiche al codice, esegui di nuovo il
+batch. La build usa [PyInstaller](https://pyinstaller.org/en/stable/usage.html).
+
+Condividi **solo `dist\VanishCam.exe`**: Python, script, modelli, tronco e MP3
+sono inclusi. Gli amici possono aprirlo con doppio clic su Windows, senza
+installare Python. La finestra del terminale mostra i messaggi di calibrazione
+e gli eventuali errori. Per l'anteprima basta una webcam; per produrre la
+webcam virtuale occorre anche un driver come OBS Virtual Camera.
+L'eseguibile in `dist` è tracciato con Git LFS: dopo una nuova build, crea un
+commit per conservare anche quella versione pronta da distribuire. Chi clona
+la repository deve avere Git LFS e usare `git lfs pull` per ottenere il file
+eseguibile completo.
+
+La build deve essere eseguita su Windows; PyInstaller non crea eseguibili
+Windows da altri sistemi operativi. L'eseguibile estrae i file inclusi in una
+cartella temporanea all'avvio, quindi il primo avvio può richiedere qualche
+secondo.
+L'icona dell'eseguibile è `assets/vanish_icon.ico`, ricavata dal tronco.
+Per cambiarla, sostituisci quel file `.ico` e ripeti `BUILD_WINDOWS.bat`.
+
 **Normal Vanish:** alza indice e medio a V. La dissolvenza parte al primo
 riconoscimento e dura circa 3,6 secondi.
 
