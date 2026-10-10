@@ -4,6 +4,10 @@ Il video viene elaborato sul computer e non viene registrato né inviato a un
 server. La finestra di anteprima e la webcam virtuale contengono solo il video
 e l'effetto, senza menu, istruzioni o altre scritte sovrapposte.
 
+## Download per Windows
+
+[Scarica VanishCam.exe](https://firebasestorage.googleapis.com/v0/b/graficammece-9b254.firebasestorage.app/o/vanish_cam%2FVanishCam.exe?alt=media&token=82017e0a-52b9-420d-88ba-a4640d5e2ffc) e avvialo con un doppio clic. Non serve installare Python.
+
 ## Avvio
 
 1. Fai doppio clic su `AVVIA_LOCALE.bat`.
@@ -102,3 +106,7 @@ si ridimensioni con il video. Abbiamo esaminato anche uno
 [sprite di fumo CC0](https://opengameart.org/content/smoke-sprite-sheet), ma
 l'animazione procedurale si adatta meglio al posizionamento dinamico senza un
 asset aggiuntivo. Nessun fotogramma o asset dell'anime è incluso nel progetto.
+
+## ☕ Buy me a coffee
+
+Se ti piace il progetto e vuoi supportarlo, puoi offrirmi un caffè tramite [PayPal](https://paypal.me/nicovic17) oppure [Revolut](https://revolut.me/nicoauriemma).
