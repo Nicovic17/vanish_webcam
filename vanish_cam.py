@@ -360,10 +360,21 @@ def apply_dissolve(
     if progress >= 0.999:
         return background.copy()
 
+    points = cv2.findNonZero((mask > 0.01).astype(np.uint8))
+    if points is None:
+        return background.copy()
+    x, y, width, height = cv2.boundingRect(points)
+    left, top = max(0, x - 18), max(0, y - 18)
+    right = min(mask.shape[1], x + width + 18)
+    bottom = min(mask.shape[0], y + height + 18)
+    area = np.s_[top:bottom, left:right]
+    mask = mask[area]
+    field = field[area]
+    sparkle_noise = sparkle_noise[area]
     eased = ease_in_out_cubic(progress)
     survival = smoothstep(eased - 0.055, eased + 0.055, field)
     alpha = mask * survival
-    output = alpha_composite(frame, background, alpha)
+    output = alpha_composite(frame[area], background[area], alpha)
     edge = (
         (np.abs(field - eased) < 0.018)
         & (mask > 0.48)
@@ -372,12 +383,15 @@ def apply_dissolve(
     glow = cv2.GaussianBlur(edge, (0, 0), sigmaX=5.0, sigmaY=5.0)
     glow = np.clip(glow * 5.0 + edge, 0.0, 1.0)[:, :, None]
     cyan = np.full_like(output, (255, 228, 92), dtype=np.uint8)
-    return np.clip(
+    result = np.clip(
         output.astype(np.float32) * (1.0 - glow * 0.8)
         + cyan.astype(np.float32) * glow * 0.8,
         0,
         255,
     ).astype(np.uint8)
+    canvas = background.copy()
+    canvas[area] = result
+    return canvas
 
 
 def victory_landmark_score(points: np.ndarray) -> float:
@@ -462,6 +476,7 @@ class MultiViewGestureRecognizer:
         self.preferred_rotation: int | None = None
         self.preferred_crop: str | None = None
         self.next_retry_ms = 0
+        self.retry_cursor = 0
 
     def recognize_gesture(self, image: mp.Image, timestamp_ms: int) -> tuple[str, float]:
         result = self.primary.recognize_for_video(image, timestamp_ms)
@@ -489,10 +504,16 @@ class MultiViewGestureRecognizer:
         views += [(crop, rotation) for crop in ("lower_left", "lower_right")
                   for rotation in (0, 1, 3)]
         preferred = (self.preferred_crop, self.preferred_rotation)
+        selected = []
         if preferred in views:
-            views.remove(preferred)
-            views.insert(0, preferred)
-        for crop, rotation in views:
+            selected.append(preferred)
+        # Spread the expensive IMAGE attempts over successive video frames.
+        while len(selected) < 3:
+            view = views[self.retry_cursor % len(views)]
+            self.retry_cursor += 1
+            if view not in selected:
+                selected.append(view)
+        for crop, rotation in selected:
             rotated = mp.Image(
                 image_format=mp.ImageFormat.SRGB,
                 data=np.ascontiguousarray(np.rot90(crops[crop], rotation)),
@@ -508,7 +529,7 @@ class MultiViewGestureRecognizer:
                 best = candidate
         self.preferred_rotation = None
         self.preferred_crop = None
-        self.next_retry_ms = timestamp_ms + 420
+        self.next_retry_ms = timestamp_ms + int(GESTURE_INTERVAL_SECONDS * 1000)
         return best
 
     def close(self) -> None:
@@ -527,6 +548,7 @@ class MultiViewHandLandmarker:
         self.preferred_view: tuple[str, int] | None = None
         self.next_retry_ms = 0
         self.last_hand_count = 0
+        self.retry_cursor = 0
 
     def recognize_joined_hands(self, image: mp.Image, timestamp_ms: int) -> bool:
         result = self.primary.detect_for_video(image, timestamp_ms)
@@ -548,10 +570,15 @@ class MultiViewHandLandmarker:
         attempts = [("full", rotation) for rotation in (1, 3, 2)]
         attempts += [("center", rotation) for rotation in (0, 1, 3)]
         attempts += [("lower_left", 0), ("lower_right", 0)]
+        selected = []
         if self.preferred_view in attempts:
-            attempts.remove(self.preferred_view)
-            attempts.insert(0, self.preferred_view)
-        for crop, rotation in attempts:
+            selected.append(self.preferred_view)
+        while len(selected) < 2:
+            view = attempts[self.retry_cursor % len(attempts)]
+            self.retry_cursor += 1
+            if view not in selected:
+                selected.append(view)
+        for crop, rotation in selected:
             rotated = mp.Image(
                 image_format=mp.ImageFormat.SRGB,
                 data=np.ascontiguousarray(np.rot90(views[crop], rotation)),
@@ -563,7 +590,7 @@ class MultiViewHandLandmarker:
                 self.next_retry_ms = timestamp_ms + 90
                 return True
         self.preferred_view = None
-        self.next_retry_ms = timestamp_ms + 250
+        self.next_retry_ms = timestamp_ms + 80
         return False
 
     def close(self) -> None:
@@ -659,9 +686,12 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
     background: np.ndarray | None = None
     background_samples: list[np.ndarray] = []
     last_mask: np.ndarray | None = None
+    last_mask_at = float("-inf")
     dissolve_field: np.ndarray | None = None
     sparkle_noise: np.ndarray | None = None
     log_anchor: tuple[int, int, int] | None = None
+    log_cache: dict[int, np.ndarray] = {}
+    vanished_frame: np.ndarray | None = None
     virtual_camera = None
     virtual_camera_initialized = False
     calibration_remaining = None
@@ -685,13 +715,12 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
                 virtual_camera_initialized = True
                 if virtual_camera is not None:
                     resources.callback(virtual_camera.close)
-            if dissolve_field is None or dissolve_field.shape != (height, width):
+            if mode == "normal" and (dissolve_field is None or dissolve_field.shape != (height, width)):
                 dissolve_field, sparkle_noise = make_dissolve_fields(height, width)
             now = time.perf_counter()
 
             elapsed_ms = int((now - started) * 1000)
-            rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            mp_image = None
 
             if state.phase == "calibrating":
                 elapsed = now - state.calibration_started
@@ -710,27 +739,31 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
                     background_samples.clear()
                     state.phase = "ready"
                     print("[Webcam] Sfondo pronto. Puoi rientrare nell'inquadratura.")
-                display = camera_frame.copy()
+                display = camera_frame
 
             elif background is None:
                 state.phase = "calibrating"
                 state.calibration_started = now
-                display = camera_frame.copy()
+                display = camera_frame
 
             elif state.phase == "vanished":
-                display = background.copy()
-                if mode == "naruto" and log_anchor is not None:
-                    overlay_log(display, log_sprite, landed_log_anchor(log_anchor, height))
+                if vanished_frame is None:
+                    vanished_frame = background.copy()
+                    if mode == "naruto" and log_anchor is not None:
+                        overlay_log(vanished_frame, log_sprite, landed_log_anchor(log_anchor, height),
+                                    cache=log_cache)
+                display = vanished_frame
 
             else:
-                mask = person_mask(segmenter, mp_image, elapsed_ms, width, height)
-                last_mask = mask
+                mask = last_mask
                 if (
                     state.phase == "ready"
                     and now - state.last_gesture_check >=
                     (0.08 if mode == "naruto" else GESTURE_INTERVAL_SECONDS)
                 ):
                     state.last_gesture_check = now
+                    rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
+                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
                     if mode == "normal":
                         name, score = recognize_gesture(recognizer, mp_image, elapsed_ms)
                         if args.gesture_debug and now - last_gesture_report >= 1.0:
@@ -749,15 +782,34 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
                             last_gesture_report = now
                         if start_naruto_on_join(state, joined, time.perf_counter()):
                             vanish_sound.play()
-                            log_anchor = substitution_anchor(mask)
+
+                if state.phase in ("vanishing", "naruto_vanishing"):
+                    # Normal dissolve tracks the silhouette at 20 Hz; Naruto
+                    # needs it only while the person is still visible.
+                    needs_mask = (
+                        (mode == "normal" and (mask is None or now - last_mask_at >= 0.05))
+                        or (mode == "naruto" and (log_anchor is None or now - state.vanish_started < 0.13))
+                    )
+                    if needs_mask:
+                        if mp_image is None:
+                            rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
+                            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                        mask = person_mask(segmenter, mp_image, elapsed_ms, width, height)
+                        last_mask = mask
+                        last_mask_at = now
+                    if mode == "naruto" and log_anchor is None:
+                        log_anchor = substitution_anchor(mask)
 
                 if mode == "naruto" and state.phase == "naruto_vanishing":
                     age = max(0.04, time.perf_counter() - state.vanish_started)
                     display = render_substitution(
-                        camera_frame, background, mask, log_sprite, log_anchor, age
+                        camera_frame, background, mask, log_sprite, log_anchor, age, log_cache
                     )
                     if age >= EFFECT_SECONDS:
                         state.phase = "vanished"
+                        vanished_frame = display
+                elif state.phase == "ready":
+                    display = camera_frame
                 else:
                     progress = 0.0
                     if state.phase == "vanishing" and state.vanish_started is not None:
@@ -769,6 +821,8 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
                     display = apply_dissolve(
                         camera_frame, background, mask, progress, dissolve_field, sparkle_noise
                     )
+                    if state.phase == "vanished":
+                        vanished_frame = display
 
             if virtual_camera is not None:
                 send_virtual_frame(virtual_camera, display)
@@ -783,6 +837,8 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
                 state.vanish_started = None
                 log_anchor = None
                 last_mask = None
+                last_mask_at = float("-inf")
+                vanished_frame = None
                 background_samples.clear()
                 calibration_remaining = None
                 print("[Webcam] Esci dall'inquadratura per 4 secondi: acquisisco il nuovo sfondo.")
@@ -790,13 +846,17 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
                 if background is not None:
                     state.phase = "ready"
                     state.vanish_started = None
+                    vanished_frame = None
+                    log_anchor = None
+                    last_mask = None
+                    last_mask_at = float("-inf")
             elif key == ord("v") and background is not None:
                 state.phase = "naruto_vanishing" if mode == "naruto" else "vanishing"
                 state.vanish_started = time.perf_counter()
                 if mode == "naruto":
                     vanish_sound.play()
-                    anchor_mask = last_mask if last_mask is not None else np.zeros((height, width))
-                    log_anchor = substitution_anchor(anchor_mask)
+                    log_anchor = None
+                vanished_frame = None
             elif key == ord("f"):
                 state.fullscreen = not state.fullscreen
                 set_fullscreen(state.fullscreen)
