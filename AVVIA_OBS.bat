@@ -1,3 +1,3 @@
 @echo off
-call "%~dp0AVVIA_LOCALE.bat" --no-virtual-camera %*
+call "%~dp0run_obs.bat" %*
 exit /b %errorlevel%

@@ -1,3 +1,4 @@
+import platform
 import time
 from pathlib import Path
 
@@ -14,7 +15,7 @@ BASE_DIR = Path(__file__).resolve().parent
 FACE_MODEL_PATH = BASE_DIR / "face_landmarker.task"
 HAND_MODEL_PATH = BASE_DIR / "hand_landmarker.task"
 MEME_PATH = BASE_DIR / "memes" / "image.png"
-# YUTA_MEME_PATH disabilitato: la relativa posa non viene caricata o rilevata.
+# YUTA_MEME_PATH disabled: the corresponding pose is not loaded or detected.
 HEARING_MEME_PATH = BASE_DIR / "memes" / "hearing.png"
 MEMEOMG_PATH = BASE_DIR / "memes" / "memeomg.png"
 SAD_MEME_PATH = BASE_DIR / "memes" / "sad.png"
@@ -30,7 +31,7 @@ CAPTURE_WIDTH = 1280
 CAPTURE_HEIGHT = 720
 VIRTUAL_CAMERA_FPS = 30
 
-# Indici MediaPipe delle parti principali della mano.
+# MediaPipe landmark indices for major hand components.
 WRIST = 0
 PALM_INDICES = (0, 5, 9, 13, 17)
 FINGERTIP_INDICES = (8, 12, 16, 20)
@@ -39,46 +40,56 @@ FINGERTIP_INDICES = (8, 12, 16, 20)
 def load_meme(path):
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None:
-        raise FileNotFoundError(f"Impossibile leggere l'immagine: {path}")
+        raise FileNotFoundError(f"Could not read image: {path}")
     return image
 
 
 def open_camera(index=0):
-    """Apre la webcam provando i backend Windows e attende il primo frame."""
-    backends = (
-        ("DirectShow", cv2.CAP_DSHOW),
-        ("Media Foundation", cv2.CAP_MSMF),
-        ("automatico", cv2.CAP_ANY),
-    )
+    """Opens webcam trying supported platform backends and waits for first frame."""
+    if platform.system() == "Windows":
+        backends = (
+            ("DirectShow", cv2.CAP_DSHOW),
+            ("Media Foundation", cv2.CAP_MSMF),
+            ("automatic", cv2.CAP_ANY),
+        )
+    elif platform.system() == "Linux":
+        backends = (
+            ("V4L2", cv2.CAP_V4L2),
+            ("automatic", cv2.CAP_ANY),
+        )
+    else:
+        backends = (
+            ("automatic", cv2.CAP_ANY),
+        )
     attempts = []
 
     for backend_name, backend in backends:
         cap = cv2.VideoCapture(index, backend)
         if not cap.isOpened():
-            attempts.append(f"{backend_name}: non disponibile")
+            attempts.append(f"{backend_name}: not available")
             cap.release()
             continue
 
-        # 1280x720 e una modalita molto piu comune di 960x540. Il frame viene
-        # ridimensionato solo dopo l'acquisizione, per la visualizzazione.
+        # 1280x720 is much more standard than 960x540. The frame is resized
+        # only after acquisition for display purposes.
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
 
         for _ in range(30):
             ok, frame = cap.read()
             if ok and frame is not None and frame.size:
-                print(f"[WEBCAM] Backend attivo: {backend_name}")
+                print(f"[WEBCAM] Active backend: {backend_name}")
                 return cap, frame
             time.sleep(0.05)
 
-        attempts.append(f"{backend_name}: aperta, ma nessun frame ricevuto")
+        attempts.append(f"{backend_name}: opened, but no frame received")
         cap.release()
 
     details = "; ".join(attempts)
     raise RuntimeError(
-        "Non riesco a ricevere immagini dalla webcam. "
-        "Chiudi eventuali programmi che la stanno usando e controlla i permessi "
-        f"di Windows. Tentativi: {details}"
+        "Could not receive frames from webcam. "
+        "Close other programs using it and check camera permissions. "
+        f"Attempts: {details}"
     )
 
 
@@ -867,21 +878,22 @@ def main():
         raise
 
     try:
+        backend = "obs" if platform.system() == "Windows" else None
         virtual_camera = pyvirtualcam.Camera(
             width=CAMERA_WIDTH,
             height=CAMERA_HEIGHT,
             fps=VIRTUAL_CAMERA_FPS,
             fmt=pyvirtualcam.PixelFormat.BGR,
-            backend="obs",
+            backend=backend,
         )
-        print(f"[WEBCAM VIRTUALE] Attiva: {virtual_camera.device}")
+        print(f"[VIRTUAL WEBCAM] Active: {virtual_camera.device}")
     except Exception as exc:
         cap.release()
         face_landmarker.close()
         hand_landmarker.close()
         raise RuntimeError(
-            "Non riesco ad avviare OBS Virtual Camera. Chiudi OBS Studio o "
-            "disattiva la sua Virtual Camera, quindi riprova."
+            "Could not start virtual camera. Close OBS Studio or stop its Virtual Camera, "
+            "or on Linux ensure v4l2loopback is loaded."
         ) from exc
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)

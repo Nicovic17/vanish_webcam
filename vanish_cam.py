@@ -1,4 +1,4 @@
-"""Webcam locale: dissolvenza avviata dal gesto con indice e medio a V."""
+"""Local webcam: vanish effect triggered by a V gesture with index and middle fingers."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ except ImportError:
 
 APP_DIR = Path(__file__).resolve().parent
 MODEL_DIR = APP_DIR / "models"
-WINDOW_NAME = "Webcam - Anteprima"
+WINDOW_NAME = "Webcam - Preview"
 
 SEGMENTER_MODEL = MODEL_DIR / "selfie_segmenter_landscape.tflite"
 GESTURE_MODEL = MODEL_DIR / "gesture_recognizer.task"
@@ -71,40 +71,40 @@ class AppState:
 def positive_fps(value: str) -> float:
     fps = float(value)
     if not np.isfinite(fps) or not 1 <= fps <= 120:
-        raise argparse.ArgumentTypeError("Gli FPS devono essere compresi tra 1 e 120.")
+        raise argparse.ArgumentTypeError("FPS must be between 1 and 120.")
     return fps
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Scegli Normal Vanish o Naruto Vanish per la webcam."
+        description="Choose Normal Vanish or Naruto Vanish for the webcam."
     )
-    parser.add_argument("--camera", type=int, default=0, help="Indice della webcam")
-    parser.add_argument("--width", type=int, default=960, help="Larghezza video")
-    parser.add_argument("--height", type=int, default=540, help="Altezza video")
+    parser.add_argument("--camera", type=int, default=0, help="Webcam device index")
+    parser.add_argument("--width", type=int, default=960, help="Video width")
+    parser.add_argument("--height", type=int, default=540, help="Video height")
     parser.add_argument(
-        "--fullscreen", action="store_true", help="Avvia a schermo intero"
+        "--fullscreen", action="store_true", help="Start in fullscreen mode"
     )
     parser.add_argument(
-        "--no-mirror", action="store_true", help="Non specchiare la webcam"
+        "--no-mirror", action="store_true", help="Do not mirror the webcam feed"
     )
-    parser.add_argument("--fps", type=positive_fps, default=30.0, help="FPS massimi dell'uscita virtuale (default: 30)")
+    parser.add_argument("--fps", type=positive_fps, default=30.0, help="Maximum FPS for virtual output (default: 30)")
     parser.add_argument(
         "--virtual-camera", action=argparse.BooleanOptionalAction, default=None,
-        help="Richiede la webcam virtuale; per default si attiva se disponibile. --no-virtual-camera la disattiva",
+        help="Request virtual camera output; enabled by default if available. Use --no-virtual-camera to disable",
     )
     parser.add_argument(
         "--virtual-backend", choices=("obs", "unitycapture", "v4l2loopback"),
-        help="Driver della webcam virtuale da usare",
+        help="Virtual camera driver backend to use",
     )
-    parser.add_argument("--virtual-device", help="Nome del dispositivo virtuale da usare")
+    parser.add_argument("--virtual-device", help="Virtual camera device name or path to use")
     parser.add_argument(
         "--mode", choices=("normal", "naruto"),
-        help="Salta il menu iniziale e avvia direttamente la modalità scelta",
+        help="Skip initial menu and directly start the chosen mode",
     )
     parser.add_argument(
         "--gesture-debug", action="store_true",
-        help="Stampa nel terminale lo stato del riconoscimento (senza scritte nel video)",
+        help="Print gesture recognition state in terminal (no on-screen overlays)",
     )
     parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
@@ -112,15 +112,15 @@ def parse_args() -> argparse.Namespace:
 
 def choose_mode() -> str | None:
     """Simple keyboard/mouse menu shown before the clean camera feed."""
-    title = "Scegli effetto"
+    title = "Choose Effect"
     selected = [None]
     window = np.zeros((420, 700, 3), dtype=np.uint8)
     window[:] = (26, 29, 34)
-    cv2.putText(window, "SCEGLI IL TUO VANISH", (68, 88),
+    cv2.putText(window, "CHOOSE YOUR VANISH", (68, 88),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.85, (236, 239, 242), 2, cv2.LINE_AA)
     buttons = (
-        ("normal", "1  NORMAL VANISH", "Segno a V  /  dissolvenza", 140),
-        ("naruto", "2  NARUTO VANISH", "Mani unite  /  tronco e fumo", 260),
+        ("normal", "1  NORMAL VANISH", "V sign  /  dissolve", 140),
+        ("naruto", "2  NARUTO VANISH", "Clapped hands  /  log & smoke", 260),
     )
     for mode, heading, detail, top in buttons:
         cv2.rectangle(window, (65, top), (635, top + 94), (48, 54, 62), -1, cv2.LINE_AA)
@@ -167,18 +167,24 @@ def open_virtual_camera(args: argparse.Namespace, width: int, height: int):
             backend=args.virtual_backend, device=args.virtual_device,
         )
     except (ImportError, RuntimeError, OSError, ValueError) as error:
-        message = (
-            "Webcam virtuale non disponibile. Installa OBS Studio (con il driver "
-            "OBS Virtual Camera) oppure Unity Capture. Se usi OBS Virtual Camera, "
-            "ferma 'Avvia fotocamera virtuale' in OBS. "
-            "Avvia da AVVIA_LOCALE.bat per installare pyvirtualcam. "
-            f"Dettaglio: {error}"
-        )
+        if platform.system() == "Linux":
+            message = (
+                "Virtual camera not available. On Linux, ensure v4l2loopback is installed and loaded "
+                "(e.g. 'sudo modprobe v4l2loopback devices=1 video_nr=10 card_label=\"Vanish Cam\" exclusive_caps=1'). "
+                "You can also use OBS Studio or run with --no-virtual-camera. "
+                f"Detail: {error}"
+            )
+        else:
+            message = (
+                "Virtual camera not available. Install OBS Studio (with OBS Virtual Camera driver) "
+                "or Unity Capture. If using OBS Virtual Camera, stop 'Start Virtual Camera' in OBS. "
+                f"Detail: {error}"
+            )
         if args.virtual_camera is True or args.virtual_backend or args.virtual_device:
             raise RuntimeError(message) from error
-        print(f"[Webcam] {message}\n[Webcam] Proseguo con l'anteprima locale.")
+        print(f"[Webcam] {message}\n[Webcam] Continuing with local preview.")
         return None
-    print(f"[Webcam] Uscita virtuale attiva: {camera.device} ({width}x{height}, {args.fps:g} FPS massimi)")
+    print(f"[Webcam] Virtual output active: {camera.device} ({width}x{height}, {args.fps:g} max FPS)")
     return camera
 
 
@@ -197,7 +203,7 @@ def download_models(mode: str = "normal") -> None:
             continue
 
         temporary = destination.with_suffix(destination.suffix + ".part")
-        print(f"[Vanish Lab] Scarico {destination.name}...")
+        print(f"[Vanish Lab] Downloading {destination.name}...")
         try:
             request = urllib.request.Request(
                 url, headers={"User-Agent": "Vanish-Lab/1.0"}
@@ -217,8 +223,8 @@ def download_models(mode: str = "normal") -> None:
         except (OSError, urllib.error.URLError) as error:
             temporary.unlink(missing_ok=True)
             raise RuntimeError(
-                "Non riesco a scaricare i modelli MediaPipe. "
-                "Controlla la connessione internet e riprova."
+                "Cannot download MediaPipe models. "
+                "Check your internet connection and try again."
             ) from error
 
 
@@ -228,12 +234,17 @@ def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
         if not capture.isOpened():
             capture.release()
             capture = cv2.VideoCapture(index)
+    elif platform.system() == "Linux":
+        capture = cv2.VideoCapture(index, cv2.CAP_V4L2)
+        if not capture.isOpened():
+            capture.release()
+            capture = cv2.VideoCapture(index)
     else:
         capture = cv2.VideoCapture(index)
 
     if not capture.isOpened():
         raise RuntimeError(
-            f"Webcam {index} non disponibile. Chiudi le altre app oppure prova --camera 1."
+            f"Webcam {index} not available. Close other applications or try --camera 1."
         )
 
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
@@ -251,7 +262,7 @@ def create_tasks(mode: str = "normal") -> tuple[vision.ImageSegmenter, MultiView
     )
     if mode == "naruto":
         if not HAND_MODEL.is_file():
-            raise RuntimeError(f"Modello delle mani non trovato: {HAND_MODEL}")
+            raise RuntimeError(f"Hand model not found: {HAND_MODEL}")
         options = vision.HandLandmarkerOptions(
             base_options=python.BaseOptions(model_asset_path=str(HAND_MODEL)),
             running_mode=vision.RunningMode.VIDEO,
@@ -395,7 +406,7 @@ def apply_dissolve(
 
 
 def victory_landmark_score(points: np.ndarray) -> float:
-    """Riconosci indice e medio distesi usando distanze 3D, non l'orientamento."""
+    """Recognize extended index and middle fingers using 3D distances, independent of orientation."""
     if points.shape != (21, 3) or not np.isfinite(points).all():
         return 0.0
 
@@ -403,7 +414,7 @@ def victory_landmark_score(points: np.ndarray) -> float:
     extended = []
     folded = []
     lengths = []
-    # MCP, PIP, DIP e punta: indice, medio, anulare, mignolo.
+    # MCP, PIP, DIP and tip: index, middle, ring, pinky.
     for index, base in enumerate((5, 9, 13, 17)):
         finger = points[base : base + 4]
         length = float(np.linalg.norm(np.diff(finger, axis=0), axis=1).sum())
@@ -423,19 +434,19 @@ def victory_landmark_score(points: np.ndarray) -> float:
         extended.append(ratio >= 0.82 and tip_distance > joint_distance * 1.10)
         folded.append(ratio < 0.78 or tip_distance <= joint_distance * 1.05)
 
-    # Di lato le dita ripiegate possono apparire dritte ma molto corte:
-    # non pretendere articolazioni ben visibili per anulare e mignolo.
+    # From the side, folded fingers may appear straight but very short:
+    # do not require prominent visible joints for ring and pinky.
     reference_length = min(lengths[:2])
     for index, base in ((2, 13), (3, 17)):
         reach = float(np.linalg.norm(points[base + 3] - points[base]))
         folded[index] = folded[index] or reach < reference_length * 0.65
     if not (extended[0] and extended[1] and folded[2] and folded[3]):
         return 0.0
-    # Le due punte devono essere separate; il pollice puo' restare nascosto.
+    # Both tips must be separated; thumb can remain hidden.
     separation = float(np.linalg.norm(points[8] - points[12]))
     if separation < min(lengths[:2]) * 0.20:
         return 0.0
-    # Qualita' geometrica delle dita distese, non probabilita' del classificatore.
+    # Geometric quality of extended fingers, not classifier probability.
     return float(np.clip(min(straightness[:2]), 0.0, 1.0))
 
 
@@ -443,15 +454,15 @@ def classify_gesture_result(
     result: vision.GestureRecognizerResult,
     image: mp.Image,
 ) -> tuple[str, float]:
-    # I landmark vengono restituiti anche quando il classificatore non riconosce
-    # "Victory" (ad esempio con il dorso della mano rivolto alla webcam).
+    # Landmarks are returned even when the classifier doesn't recognize
+    # "Victory" (for example, with the back of the hand facing the webcam).
     for landmarks in result.hand_world_landmarks:
         points = np.array([(point.x, point.y, point.z) for point in landmarks])
         score = victory_landmark_score(points)
         if score:
             return "Victory", score
-    # Controlla SEMPRE anche la geometria visibile: la profondita' stimata
-    # puo' essere imprecisa quando palmo e dita piegate sono nascosti.
+    # ALWAYS check visible 2D geometry as well: estimated depth can be
+    # inaccurate when palm and folded fingers are occluded.
     for landmarks in result.hand_landmarks:
         points = np.array([(point.x * image.width, point.y * image.height, 0.0)
                            for point in landmarks])
@@ -468,7 +479,7 @@ def classify_gesture_result(
 
 
 class MultiViewGestureRecognizer:
-    """Riprova la rilevazione su fotogrammi ruotati senza alterare il tracking."""
+    """Retry detection on rotated / cropped frames without disrupting tracking."""
 
     def __init__(self, primary, alternate):
         self.primary = primary
@@ -488,13 +499,12 @@ class MultiViewGestureRecognizer:
         if timestamp_ms < self.next_retry_ms:
             return best
 
-        # IMAGE forza una nuova rilevazione; il modello VIDEO resta sul frame
-        # originale. Evita timestamp/tracking incoerenti tra rotazioni diverse.
+        # IMAGE forces fresh detection; VIDEO model stays on original frame.
+        # Avoids inconsistent timestamps/tracking across different rotations.
         rgb = image.numpy_view()
         height, width = rgb.shape[:2]
-        # Il palmo nella posa laterale e' spesso troppo piccolo nel frame
-        # completo. I due ritagli inferiori si sovrappongono e coprono entrambe
-        # le mani, anche quando l'immagine e' specchiata.
+        # In sideways poses, the palm is often too small in the full frame.
+        # The two lower crops overlap and cover both hands, even when mirrored.
         crops = {
             "full": rgb,
             "lower_left": rgb[int(height * 0.28):, :int(width * 0.78)],
@@ -611,7 +621,7 @@ def recognize_gesture(
 
 
 def start_vanish_on_gesture(state: AppState, name: str, score: float, now: float) -> bool:
-    """Avvia la dissolvenza al primo riconoscimento affidabile della V."""
+    """Trigger vanish on the first reliable V sign detection."""
     if state.phase == "ready" and name == "Victory" and score >= 0.62:
         state.phase = "vanishing"
         state.vanish_started = now
@@ -637,7 +647,7 @@ def self_test() -> int:
     required = (SEGMENTER_MODEL, GESTURE_MODEL, HAND_MODEL, SOUND_PATH)
     missing = [path.name for path in required if not path.is_file()]
     if missing:
-        raise RuntimeError(f"Risorse mancanti: {', '.join(missing)}")
+        raise RuntimeError(f"Missing resources: {', '.join(missing)}")
     load_log()
     import pygame.mixer  # The distributed build must contain its MP3 decoder.
     for mode in ("normal", "naruto"):
@@ -646,7 +656,7 @@ def self_test() -> int:
             recognizer.close()
         finally:
             segmenter.close()
-    print("[Webcam] Self-test completato: modelli, asset e audio presenti.")
+    print("[Webcam] Self-test complete: models, assets, and audio present.")
     return 0
 
 
@@ -697,14 +707,14 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
     calibration_remaining = None
     last_gesture_report = 0.0
     started = time.perf_counter()
-    print("[Webcam] Esci dall'inquadratura per 4 secondi: acquisisco lo sfondo.")
-    print("[Webcam] Comandi nella finestra: SPAZIO nuovo sfondo, R riappari, V svanisci, F fullscreen, Q esci.")
+    print("[Webcam] Step out of the frame for 4 seconds: capturing background.")
+    print("[Webcam] In-window controls: SPACE new background, R reappear, V vanish, F fullscreen, Q quit.")
 
     try:
         while True:
             ok, camera_frame = capture.read()
             if not ok:
-                raise RuntimeError("La webcam ha smesso di restituire immagini.")
+                raise RuntimeError("Webcam stopped returning frames.")
 
             if not args.no_mirror:
                 camera_frame = cv2.flip(camera_frame, 1)
@@ -726,7 +736,7 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
                 elapsed = now - state.calibration_started
                 remaining = max(0, int(np.ceil(CALIBRATION_SECONDS - elapsed)))
                 if remaining != calibration_remaining:
-                    print(f"[Webcam] Acquisizione sfondo: {remaining} secondi.")
+                    print(f"[Webcam] Background capture: {remaining} seconds.")
                     calibration_remaining = remaining
                 if elapsed >= CALIBRATION_SECONDS - BACKGROUND_SAMPLE_SECONDS:
                     background_samples.append(camera_frame.copy())
@@ -738,7 +748,7 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
                         background = camera_frame.copy()
                     background_samples.clear()
                     state.phase = "ready"
-                    print("[Webcam] Sfondo pronto. Puoi rientrare nell'inquadratura.")
+                    print("[Webcam] Background ready. You can return to the frame.")
                 display = camera_frame
 
             elif background is None:
@@ -768,17 +778,17 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
                         name, score = recognize_gesture(recognizer, mp_image, elapsed_ms)
                         if args.gesture_debug and now - last_gesture_report >= 1.0:
                             print(
-                                f"[Gesto] {name}, valore={score:.2f}, "
-                                f"ritaglio={recognizer.preferred_crop or 'full'}, "
-                                f"rotazione={recognizer.preferred_rotation or 0}"
+                                f"[Gesture] {name}, score={score:.2f}, "
+                                f"crop={recognizer.preferred_crop or 'full'}, "
+                                f"rotation={recognizer.preferred_rotation or 0}"
                             )
                             last_gesture_report = now
                         start_vanish_on_gesture(state, name, score, now)
                     else:
                         joined = recognizer.recognize_joined_hands(mp_image, elapsed_ms)
                         if args.gesture_debug and now - last_gesture_report >= 1.0:
-                            print(f"[Mani] rilevate={recognizer.last_hand_count}, "
-                                  f"unite={joined}, vista={recognizer.preferred_view or 'full'}")
+                            print(f"[Hands] detected={recognizer.last_hand_count}, "
+                                  f"joined={joined}, view={recognizer.preferred_view or 'full'}")
                             last_gesture_report = now
                         if start_naruto_on_join(state, joined, time.perf_counter()):
                             vanish_sound.play()
@@ -841,7 +851,7 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
                 vanished_frame = None
                 background_samples.clear()
                 calibration_remaining = None
-                print("[Webcam] Esci dall'inquadratura per 4 secondi: acquisisco il nuovo sfondo.")
+                print("[Webcam] Step out of the frame for 4 seconds: capturing new background.")
             elif key == ord("r"):
                 if background is not None:
                     state.phase = "ready"
@@ -874,7 +884,7 @@ def main() -> int:
     except KeyboardInterrupt:
         return 0
     except Exception as error:
-        print(f"\n[Vanish Lab] ERRORE: {error}", file=sys.stderr)
+        print(f"\n[Vanish Lab] ERROR: {error}", file=sys.stderr)
         return 1
 
 

@@ -6,7 +6,10 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from local_app import vanish_cam as app
+try:
+    from local_app import vanish_cam as app
+except ImportError:
+    import vanish_cam as app
 
 
 def arguments(**overrides):
@@ -47,7 +50,7 @@ class VirtualCameraTests(unittest.TestCase):
     def test_send_preserves_colors_and_handles_noncontiguous_frames(self):
         camera = Mock(width=40, height=24)
         frame = np.zeros((24, 40, 3), np.uint8)
-        frame[:] = (10, 70, 200)  # BGR: non scambiare rosso e blu.
+        frame[:] = (10, 70, 200)  # BGR: do not swap red and blue.
         app.send_virtual_frame(camera, frame[:, ::-1])
         sent = camera.send.call_args.args[0]
         self.assertTrue(sent.flags.c_contiguous)
@@ -86,7 +89,7 @@ class VideoLoopTests(unittest.TestCase):
             mocks.enter_context(patch.object(app.cv2, "imshow", side_effect=lambda name, frame: displayed.append(frame.copy())))
             keys = (0, 0, ord("v") if gesture[0] != "Victory" else 0, 0, ord("q"))
             mocks.enter_context(patch.object(app.cv2, "waitKey", side_effect=keys))
-            mocks.enter_context(patch.object(app.cv2, "putText", side_effect=AssertionError("Overlay vietato")))
+            mocks.enter_context(patch.object(app.cv2, "putText", side_effect=AssertionError("Overlay forbidden")))
             mocks.enter_context(patch("builtins.print"))
             if send_error is None:
                 self.assertEqual(app.run(), 0)
@@ -107,16 +110,16 @@ class VideoLoopTests(unittest.TestCase):
         self.assertEqual(len(displayed), 5)
         for sent, preview in zip(camera.send.call_args_list, displayed):
             np.testing.assert_array_equal(sent.args[0], preview)
-        np.testing.assert_array_equal(displayed[0], frames[0])  # Calibrazione.
-        np.testing.assert_array_equal(displayed[2], frames[2])  # Pronto.
-        np.testing.assert_array_equal(displayed[4], frames[1])  # Sparito: solo sfondo.
+        np.testing.assert_array_equal(displayed[0], frames[0])  # Calibration.
+        np.testing.assert_array_equal(displayed[2], frames[2])  # Ready.
+        np.testing.assert_array_equal(displayed[4], frames[1])  # Vanished: background only.
 
     def test_first_gesture_starts_dissolve_in_preview_and_virtual_output(self):
         frames, camera, displayed = self.run_mock_video(gesture=("Victory", 0.9))
         np.testing.assert_array_equal(camera.send.call_args_list[2].args[0], displayed[2])
-        self.assertTrue(np.any(displayed[3] != frames[3]))  # Animazione in corso.
-        self.assertTrue(np.any(displayed[3] != frames[1]))  # Non ancora sparito.
-        np.testing.assert_array_equal(displayed[4], frames[1])  # Animazione completata.
+        self.assertTrue(np.any(displayed[3] != frames[3]))  # Animation in progress.
+        self.assertTrue(np.any(displayed[3] != frames[1]))  # Not yet vanished.
+        np.testing.assert_array_equal(displayed[4], frames[1])  # Animation complete.
 
     def test_all_devices_close_on_send_error(self):
         self.run_mock_video(send_error=RuntimeError("send failed"))

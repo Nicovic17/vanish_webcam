@@ -4,10 +4,16 @@ from types import SimpleNamespace
 import numpy as np
 import mediapipe as mp
 
-from local_app.vanish_cam import (
-    AppState, MultiViewGestureRecognizer, recognize_gesture, start_vanish_on_gesture,
-    victory_landmark_score,
-)
+try:
+    from local_app.vanish_cam import (
+        AppState, MultiViewGestureRecognizer, recognize_gesture, start_vanish_on_gesture,
+        victory_landmark_score,
+    )
+except ImportError:
+    from vanish_cam import (
+        AppState, MultiViewGestureRecognizer, recognize_gesture, start_vanish_on_gesture,
+        victory_landmark_score,
+    )
 
 
 def hand_points(extended=(True, True, False, False)):
@@ -49,11 +55,11 @@ class VictoryGestureTests(unittest.TestCase):
 
     def test_other_gestures_do_not_trigger(self):
         for fingers in (
-            (False, False, False, False),  # Pugno.
-            (True, True, True, True),  # Palmo aperto.
-            (True, False, False, False),  # Solo indice.
-            (True, False, False, True),  # Corna.
-            (True, True, True, False),  # Tre dita.
+            (False, False, False, False),  # Fist.
+            (True, True, True, True),  # Open palm.
+            (True, False, False, False),  # Index only.
+            (True, False, False, True),  # Horns.
+            (True, True, True, False),  # Three fingers.
         ):
             with self.subTest(fingers=fingers):
                 self.assertEqual(victory_landmark_score(hand_points(fingers)), 0.0)
@@ -184,9 +190,9 @@ class MultiViewTests(unittest.TestCase):
             SimpleNamespace(recognize_for_video=lambda image, timestamp: self.empty), alternate
         )
         self.assertEqual(recognize_gesture(detector, self.image, 1000)[0], "No_Hand")
-        self.assertEqual(len(calls), 10)
-        recognize_gesture(detector, self.image, 1140)
-        self.assertEqual(len(calls), 10)
+        self.assertEqual(len(calls), 3)
+        recognize_gesture(detector, self.image, 1080)
+        self.assertEqual(len(calls), 3)
         alternate.recognize = lambda image: self.victory
         self.assertEqual(recognize_gesture(detector, self.image, 1420)[0], "Victory")
         alternate.recognize = lambda image: self.empty
@@ -212,11 +218,12 @@ class MultiViewTests(unittest.TestCase):
             SimpleNamespace(recognize_for_video=lambda image, timestamp: self.empty),
             SimpleNamespace(recognize=recognize),
         )
-        self.assertEqual(recognize_gesture(detector, self.image, 1000)[0], "Victory")
+        self.assertEqual(recognize_gesture(detector, self.image, 1000)[0], "No_Hand")
+        self.assertEqual(recognize_gesture(detector, self.image, 1150)[0], "Victory")
         self.assertEqual(detector.preferred_crop, "lower_left")
         self.assertEqual(detector.preferred_rotation, 0)
         calls.clear()
-        self.assertEqual(recognize_gesture(detector, self.image, 1140)[0], "Victory")
+        self.assertEqual(recognize_gesture(detector, self.image, 1290)[0], "Victory")
         self.assertEqual(calls, [(37, 24)])
 
 
