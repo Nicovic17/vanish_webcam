@@ -5,12 +5,20 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from local_app import vanish_cam as app
-from local_app.naruto_effect import (
-    EFFECT_SECONDS, falling_log_anchor, joined_hands_from_landmarks,
-    landed_log_anchor, load_log, overlay_log, render_substitution, substitution_anchor,
-)
-from local_app.test_video_output import arguments
+try:
+    from local_app import vanish_cam as app
+    from local_app.naruto_effect import (
+        EFFECT_SECONDS, falling_log_anchor, joined_hands_from_landmarks,
+        landed_log_anchor, load_log, overlay_log, render_substitution, substitution_anchor,
+    )
+    from local_app.test_video_output import arguments
+except ImportError:
+    import vanish_cam as app
+    from naruto_effect import (
+        EFFECT_SECONDS, falling_log_anchor, joined_hands_from_landmarks,
+        landed_log_anchor, load_log, overlay_log, render_substitution, substitution_anchor,
+    )
+    from test_video_output import arguments
 
 
 class JoinedHandsTests(unittest.TestCase):
@@ -158,7 +166,7 @@ class NarutoVideoLoopTests(unittest.TestCase):
             mocks.enter_context(patch.object(app.cv2, "destroyAllWindows"))
             mocks.enter_context(patch.object(app.cv2, "imshow", side_effect=lambda name, frame: preview.append(frame.copy())))
             mocks.enter_context(patch.object(app.cv2, "waitKey", side_effect=(0, 0, 0, 0, ord("q"))))
-            mocks.enter_context(patch.object(app.cv2, "putText", side_effect=AssertionError("Overlay vietato")))
+            mocks.enter_context(patch.object(app.cv2, "putText", side_effect=AssertionError("Overlay forbidden")))
             mocks.enter_context(patch("builtins.print"))
             self.assertEqual(app.run(), 0)
         self.assertEqual(len(preview), 5)
@@ -166,7 +174,7 @@ class NarutoVideoLoopTests(unittest.TestCase):
             np.testing.assert_array_equal(sent.args[0], shown)
         self.assertTrue(np.any(preview[2] != frames[2]))
         self.assertTrue(np.any(preview[3] != frames[3]))
-        self.assertTrue(np.any(preview[4] != frames[1]))  # Tronco persistente.
+        self.assertTrue(np.any(preview[4] != frames[1]))  # Persistent log.
         recognizer.recognize_joined_hands.assert_called_once()
         sound.play.assert_called_once()
         sound.close.assert_called_once()

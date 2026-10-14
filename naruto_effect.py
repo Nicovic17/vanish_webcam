@@ -56,7 +56,7 @@ def substitution_anchor(mask: np.ndarray) -> tuple[int, int, int]:
 def load_log() -> np.ndarray:
     sprite = cv2.imread(str(LOG_PATH), cv2.IMREAD_UNCHANGED)
     if sprite is None or sprite.ndim != 3 or sprite.shape[2] != 4:
-        raise RuntimeError(f"Sprite del tronco non disponibile: {LOG_PATH}")
+        raise RuntimeError(f"Substitution log sprite not available: {LOG_PATH}")
     return sprite
 
 
