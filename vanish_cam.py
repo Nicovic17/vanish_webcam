@@ -155,25 +155,49 @@ def choose_mode() -> str | None:
         cv2.destroyWindow(title)
 
 
+def default_virtual_backend() -> str | None:
+    """Backend consigliato per il sistema operativo in uso.
+
+    Su macOS l'unico driver supportato da pyvirtualcam e OBS Virtual Camera; su
+    Linux e v4l2loopback. Su Windows lasciamo che pyvirtualcam scelga da solo
+    (OBS o Unity Capture)."""
+    system = platform.system()
+    if system == "Darwin":
+        return "obs"
+    if system == "Linux":
+        return "v4l2loopback"
+    return None
+
+
 def open_virtual_camera(args: argparse.Namespace, width: int, height: int):
     if args.virtual_camera is False:
         return None
+    backend = args.virtual_backend or default_virtual_backend()
     try:
         import pyvirtualcam
 
         camera = pyvirtualcam.Camera(
             width=width, height=height, fps=args.fps,
             fmt=pyvirtualcam.PixelFormat.BGR,
-            backend=args.virtual_backend, device=args.virtual_device,
+            backend=backend, device=args.virtual_device,
         )
     except (ImportError, RuntimeError, OSError, ValueError) as error:
-        message = (
-            "Webcam virtuale non disponibile. Installa OBS Studio (con il driver "
-            "OBS Virtual Camera) oppure Unity Capture. Se usi OBS Virtual Camera, "
-            "ferma 'Avvia fotocamera virtuale' in OBS. "
-            "Avvia da AVVIA_LOCALE.bat per installare pyvirtualcam. "
-            f"Dettaglio: {error}"
-        )
+        if platform.system() == "Darwin":
+            message = (
+                "Webcam virtuale non disponibile. Su macOS installa OBS Studio "
+                "(include il driver OBS Virtual Camera) e assicurati che in OBS "
+                "'Avvia fotocamera virtuale' sia FERMO. Avvia da avvia_locale.sh "
+                "per installare pyvirtualcam. "
+                f"Dettaglio: {error}"
+            )
+        else:
+            message = (
+                "Webcam virtuale non disponibile. Installa OBS Studio (con il driver "
+                "OBS Virtual Camera) oppure Unity Capture. Se usi OBS Virtual Camera, "
+                "ferma 'Avvia fotocamera virtuale' in OBS. "
+                "Avvia da AVVIA_LOCALE.bat per installare pyvirtualcam. "
+                f"Dettaglio: {error}"
+            )
         if args.virtual_camera is True or args.virtual_backend or args.virtual_device:
             raise RuntimeError(message) from error
         print(f"[Webcam] {message}\n[Webcam] Proseguo con l'anteprima locale.")

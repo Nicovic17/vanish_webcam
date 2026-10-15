@@ -21,6 +21,48 @@ Se ti piace il progetto e vuoi supportarlo, puoi offrirmi un caffè tramite [Pay
 3. Esci dall'inquadratura per 4 secondi, mentre viene acquisito lo sfondo.
    Il terminale segnala quando puoi rientrare.
 
+## macOS
+
+Su macOS si usa Python 3 e gli script `.sh` al posto dei `.bat`. Da Terminale,
+nella cartella del progetto:
+
+```bash
+./avvia_locale.sh                 # menu + anteprima locale
+./avvia_locale.sh --mode naruto   # avvia direttamente una modalita
+./avvia_virtual.sh                # richiede la webcam virtuale (serve OBS)
+./avvia_obs.sh                    # solo anteprima, sorgente per una scena OBS
+```
+
+Il primo avvio crea un ambiente Python locale (`.venv-local`) e installa le
+dipendenze: serve internet solo quella volta.
+
+**Versioni richieste su macOS (Apple Silicon).** Usa **Python 3.12** (con 3.14
+`pygame` non ha un pacchetto pronto e fallisce la compilazione) e aggiorna
+`mediapipe` alla **1.1.1**: la 1.0.1 pinnata in `requirements.txt` va in crash su Mac
+(`Service is unavailable` / `DrishtiMetalHelper`, servizio Metal) quando crea il
+riconoscitore di gesti/mani. Dopo aver creato l'ambiente:
+
+```bash
+.venv-local/bin/python -m pip install "mediapipe==1.1.1"
+```
+
+Il pin 1.0.1 resta per Windows/Linux, dove funziona; solo macOS richiede la 1.1.1.
+
+**Permesso fotocamera.** Alla prima esecuzione macOS chiede di autorizzare
+l'accesso alla fotocamera per il Terminale (o per l'app da cui lanci lo script).
+Se neghi per errore, riattivalo in **Impostazioni di Sistema > Privacy e
+sicurezza > Fotocamera**.
+
+**Anteprima locale vs webcam virtuale.** L'anteprima locale (la finestra con il
+video e l'effetto) funziona da sola, senza installare altro. La **webcam
+virtuale** su macOS richiede **[OBS Studio](https://obsproject.com/)** installato:
+e l'unico driver di fotocamera virtuale supportato su Mac. Con OBS installato,
+lascia **ferma** la fotocamera virtuale in OBS e avvia `./avvia_virtual.sh`; nel
+programma destinatario (Zoom, Meet, ...) scegli **OBS Virtual Camera**.
+
+Se `pygame` non si installasse, l'audio Naruto puo usare `ffplay`
+(`brew install ffmpeg`); con `pygame` presente non serve.
+
 
 **Normal Vanish:** alza indice e medio a V. La dissolvenza parte al primo
 riconoscimento e dura circa 3,6 secondi.

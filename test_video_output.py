@@ -26,7 +26,8 @@ class VirtualCameraTests(unittest.TestCase):
         with patch.dict("sys.modules", pyvirtualcam=module):
             self.assertIs(app.open_virtual_camera(arguments(), 640, 480), camera)
         module.Camera.assert_called_once_with(
-            width=640, height=480, fps=30.0, fmt="BGR", backend=None, device=None,
+            width=640, height=480, fps=30.0, fmt="BGR",
+            backend=app.default_virtual_backend(), device=None,
         )
 
     def test_unavailable_driver_auto_falls_back_but_explicit_mode_fails(self):
