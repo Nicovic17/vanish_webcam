@@ -184,9 +184,9 @@ class MultiViewTests(unittest.TestCase):
             SimpleNamespace(recognize_for_video=lambda image, timestamp: self.empty), alternate
         )
         self.assertEqual(recognize_gesture(detector, self.image, 1000)[0], "No_Hand")
-        self.assertEqual(len(calls), 10)
+        self.assertEqual(len(calls), 3)
         recognize_gesture(detector, self.image, 1140)
-        self.assertEqual(len(calls), 10)
+        self.assertEqual(len(calls), 6)
         alternate.recognize = lambda image: self.victory
         self.assertEqual(recognize_gesture(detector, self.image, 1420)[0], "Victory")
         alternate.recognize = lambda image: self.empty
@@ -212,11 +212,12 @@ class MultiViewTests(unittest.TestCase):
             SimpleNamespace(recognize_for_video=lambda image, timestamp: self.empty),
             SimpleNamespace(recognize=recognize),
         )
-        self.assertEqual(recognize_gesture(detector, self.image, 1000)[0], "Victory")
+        self.assertEqual(recognize_gesture(detector, self.image, 1000)[0], "No_Hand")
+        self.assertEqual(recognize_gesture(detector, self.image, 1140)[0], "Victory")
         self.assertEqual(detector.preferred_crop, "lower_left")
         self.assertEqual(detector.preferred_rotation, 0)
         calls.clear()
-        self.assertEqual(recognize_gesture(detector, self.image, 1140)[0], "Victory")
+        self.assertEqual(recognize_gesture(detector, self.image, 1280)[0], "Victory")
         self.assertEqual(calls, [(37, 24)])
 
 

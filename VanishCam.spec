@@ -10,8 +10,10 @@ resources = [
     (root / "hand_landmarker.task", "."),
     (root / "models" / "gesture_recognizer.task", "models"),
     (root / "models" / "selfie_segmenter_landscape.tflite", "models"),
+    (root / "models" / "blaze_face_short_range.tflite", "models"),
     (root / "assets" / "substitution_log.png", "assets"),
     (root / "assets" / "vanish.MP3", "assets"),
+    (root / "assets" / "teleport.MP3", "assets"),
 ]
 missing = [str(path) for path, _ in resources if not path.is_file()]
 if not icon_file.is_file():

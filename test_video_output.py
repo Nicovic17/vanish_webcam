@@ -61,8 +61,24 @@ class VirtualCameraTests(unittest.TestCase):
         self.assertTrue((sent == 42).all())
 
 
+class MenuTests(unittest.TestCase):
+    def test_particles_can_be_selected_with_three(self):
+        with patch.object(app.cv2, "namedWindow"), patch.object(app.cv2, "setMouseCallback"), \
+             patch.object(app.cv2, "imshow"), patch.object(app.cv2, "destroyWindow"), \
+             patch.object(app.cv2, "waitKey", return_value=ord("3")), \
+             patch.object(app.cv2, "getWindowProperty", return_value=1):
+            self.assertEqual(app.choose_mode(), "particles")
+
+    def test_goku_can_be_selected_with_four(self):
+        with patch.object(app.cv2, "namedWindow"), patch.object(app.cv2, "setMouseCallback"), \
+             patch.object(app.cv2, "imshow"), patch.object(app.cv2, "destroyWindow"), \
+             patch.object(app.cv2, "waitKey", return_value=ord("4")), \
+             patch.object(app.cv2, "getWindowProperty", return_value=1):
+            self.assertEqual(app.choose_mode(), "goku")
+
+
 class VideoLoopTests(unittest.TestCase):
-    def run_mock_video(self, send_error=None, gesture=("No_Hand", 0.0)):
+    def run_mock_video(self, send_error=None, gesture=("No_Hand", 0.0), mode="normal"):
         capture = Mock()
         frames = [np.full((24, 40, 3), color, np.uint8) for color in (10, 40, 80, 120, 160)]
         capture.read.side_effect = [(True, frame) for frame in frames]
@@ -71,12 +87,14 @@ class VideoLoopTests(unittest.TestCase):
         camera.send.side_effect = send_error
         displayed = []
         with ExitStack() as mocks:
-            mocks.enter_context(patch.object(app, "parse_args", return_value=arguments()))
+            mocks.enter_context(patch.object(app, "parse_args", return_value=arguments(mode=mode)))
             mocks.enter_context(patch.object(app, "download_models"))
             mocks.enter_context(patch.object(app, "open_camera", return_value=capture))
             mocks.enter_context(patch.object(app, "create_tasks", return_value=(segmenter, recognizer)))
             opening = mocks.enter_context(patch.object(app, "open_virtual_camera", return_value=camera))
-            mocks.enter_context(patch.object(app, "person_mask", return_value=np.ones((24, 40), np.float32)))
+            segment = mocks.enter_context(patch.object(
+                app, "person_mask", return_value=np.ones((24, 40), np.float32),
+            ))
             mocks.enter_context(patch.object(app, "recognize_gesture", return_value=gesture))
             times = (0, 0, 0.1, 4.1, 4.3, 4.35, 5.0, 5.02, 8.2, 8.23)
             mocks.enter_context(patch.object(app.time, "perf_counter", side_effect=times))
@@ -100,6 +118,8 @@ class VideoLoopTests(unittest.TestCase):
             recognizer.close.assert_called_once()
             camera.close.assert_called_once()
             destroy.assert_called_once()
+            if mode == "particles":
+                segment.assert_called_once()  # Una sola acquisizione della sagoma.
         return frames, camera, displayed
 
     def test_preview_and_virtual_output_are_clean_in_all_phases(self):
@@ -118,8 +138,85 @@ class VideoLoopTests(unittest.TestCase):
         self.assertTrue(np.any(displayed[3] != frames[1]))  # Non ancora sparito.
         np.testing.assert_array_equal(displayed[4], frames[1])  # Animazione completata.
 
+    def test_particles_use_same_v_gesture_and_virtual_output(self):
+        frames, camera, displayed = self.run_mock_video(
+            gesture=("Victory", 0.9), mode="particles",
+        )
+        self.assertTrue(np.any(displayed[2] != frames[2]))  # Parte subito.
+        self.assertTrue(np.any(displayed[3] != frames[3]))  # Corpo si dissolve.
+        np.testing.assert_array_equal(displayed[4], frames[1])
+        for sent, preview in zip(camera.send.call_args_list, displayed):
+            np.testing.assert_array_equal(sent.args[0], preview)
+
     def test_all_devices_close_on_send_error(self):
         self.run_mock_video(send_error=RuntimeError("send failed"))
+
+    def test_goku_vanishes_and_reappears_only_after_one_second_holds(self):
+        first_hold = tuple(4.3 + index * 0.101 for index in range(11))
+        second_hold = tuple(6.4 + index * 0.101 for index in range(11))
+        times = (0.1, 4.1) + first_hold + (5.4, 5.64, 5.8, 6.2) \
+            + second_hold + (7.5, 7.74, 7.9)
+        clock = [0.0]
+        frames = [np.full((80, 120, 3), 40 if i < 2 else 160, np.uint8)
+                  for i in range(len(times))]
+        capture = Mock()
+        cursor = [0]
+
+        def read_frame():
+            index = cursor[0]
+            cursor[0] += 1
+            clock[0] = times[index]
+            return True, frames[index]
+
+        capture.read.side_effect = read_frame
+        segmenter = Mock()
+        recognizer = Mock()
+        recognizer.recognize_pose.side_effect = (
+            [True] * 11 + [False] * 2 + [True] * 11 + [False]
+        )
+        camera = Mock(width=120, height=80)
+        sound = Mock()
+        mask = np.zeros((80, 120), np.float32)
+        mask[10:70, 30:90] = 1.0
+        displayed = []
+        keys = [0] * len(times)
+        keys[2] = ord("v")  # Manual activation is forbidden in Goku mode.
+        keys[14] = ord("r")  # Manual return is forbidden too.
+        keys[-1] = ord("q")
+        with ExitStack() as mocks:
+            mocks.enter_context(patch.object(app, "download_models"))
+            mocks.enter_context(patch.object(app, "open_camera", return_value=capture))
+            mocks.enter_context(patch.object(app, "create_tasks", return_value=(segmenter, recognizer)))
+            mocks.enter_context(patch.object(app, "open_virtual_camera", return_value=camera))
+            masks = mocks.enter_context(patch.object(app, "person_mask", return_value=mask))
+            sound_factory = mocks.enter_context(patch.object(app, "VanishSound", return_value=sound))
+            mocks.enter_context(patch.object(app.time, "perf_counter", side_effect=lambda: clock[0]))
+            mocks.enter_context(patch.object(app.cv2, "namedWindow"))
+            mocks.enter_context(patch.object(app.cv2, "resizeWindow"))
+            mocks.enter_context(patch.object(app.cv2, "destroyAllWindows"))
+            mocks.enter_context(patch.object(app.cv2, "imshow", side_effect=lambda name, frame: displayed.append(frame.copy())))
+            mocks.enter_context(patch.object(app.cv2, "waitKey", side_effect=keys))
+            printed = mocks.enter_context(patch("builtins.print"))
+            with ExitStack() as resources:
+                self.assertEqual(app.run_camera(arguments(mode="goku"), resources, "goku"), 0)
+
+        self.assertEqual(masks.call_count, 2)
+        sound_factory.assert_called_once_with(app.TELEPORT_SOUND_PATH)
+        self.assertEqual(sound.play.call_count, 2)
+        countdown = [call.args[0] for call in printed.call_args_list
+                     if call.args and call.args[0].startswith("[Goku] ")]
+        self.assertEqual(countdown, [
+            "[Goku] Sparizione tra 1...",
+            "[Goku] Sparizione!",
+            "[Goku] Riapparizione tra 1...",
+            "[Goku] Riapparizione!",
+        ])
+        np.testing.assert_array_equal(displayed[2], frames[2])
+        np.testing.assert_array_equal(displayed[14], frames[1])
+        np.testing.assert_array_equal(displayed[16], frames[1])
+        np.testing.assert_array_equal(displayed[29][40, 60], frames[29][40, 60])
+        for sent, preview in zip(camera.send.call_args_list, displayed):
+            np.testing.assert_array_equal(sent.args[0], preview)
 
 
 if __name__ == "__main__":
