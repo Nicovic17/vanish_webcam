@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from local_app import vanish_cam as app
+import vanish_cam as app
 
 
 def arguments(**overrides):

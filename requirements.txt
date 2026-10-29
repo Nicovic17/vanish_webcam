@@ -1,4 +1,4 @@
-mediapipe==1.0.1
+mediapipe==1.2.0
 opencv-contrib-python>=4.14,<6
 numpy>=2.0,<3
 pyvirtualcam>=0.15,<1

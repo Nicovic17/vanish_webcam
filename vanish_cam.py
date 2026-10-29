@@ -242,9 +242,14 @@ def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
     return capture
 
 
-def create_tasks(mode: str = "normal") -> tuple[vision.ImageSegmenter, MultiViewGestureRecognizer | MultiViewHandLandmarker]:
+def create_tasks(
+    mode: str = "normal",
+    delegate: python.BaseOptions.Delegate | None = None,
+) -> tuple[vision.ImageSegmenter, MultiViewGestureRecognizer | MultiViewHandLandmarker]:
     segmenter_options = vision.ImageSegmenterOptions(
-        base_options=python.BaseOptions(model_asset_path=str(SEGMENTER_MODEL)),
+        base_options=python.BaseOptions(
+            model_asset_path=str(SEGMENTER_MODEL), delegate=delegate
+        ),
         running_mode=vision.RunningMode.VIDEO,
         output_confidence_masks=True,
         output_category_mask=False,
@@ -253,7 +258,9 @@ def create_tasks(mode: str = "normal") -> tuple[vision.ImageSegmenter, MultiView
         if not HAND_MODEL.is_file():
             raise RuntimeError(f"Modello delle mani non trovato: {HAND_MODEL}")
         options = vision.HandLandmarkerOptions(
-            base_options=python.BaseOptions(model_asset_path=str(HAND_MODEL)),
+            base_options=python.BaseOptions(
+                model_asset_path=str(HAND_MODEL), delegate=delegate
+            ),
             running_mode=vision.RunningMode.VIDEO,
             num_hands=2,
             min_hand_detection_confidence=0.35,
@@ -268,7 +275,9 @@ def create_tasks(mode: str = "normal") -> tuple[vision.ImageSegmenter, MultiView
             category_allowlist=["Victory"],
         )
         options = vision.GestureRecognizerOptions(
-            base_options=python.BaseOptions(model_asset_path=str(GESTURE_MODEL)),
+            base_options=python.BaseOptions(
+                model_asset_path=str(GESTURE_MODEL), delegate=delegate
+            ),
             running_mode=vision.RunningMode.VIDEO,
             num_hands=2,
             min_hand_detection_confidence=0.35,
@@ -639,9 +648,15 @@ def self_test() -> int:
     if missing:
         raise RuntimeError(f"Risorse mancanti: {', '.join(missing)}")
     load_log()
-    import pygame.mixer  # The distributed build must contain its MP3 decoder.
+    if sys.platform == "darwin":
+        sound = VanishSound()
+        sound.close()
+    else:
+        import pygame.mixer  # The distributed Windows build must contain its MP3 decoder.
+
     for mode in ("normal", "naruto"):
-        segmenter, recognizer = create_tasks(mode)
+        # Keep the no-camera build check independent of macOS Metal initialization.
+        segmenter, recognizer = create_tasks(mode, python.BaseOptions.Delegate.CPU)
         try:
             recognizer.close()
         finally:
