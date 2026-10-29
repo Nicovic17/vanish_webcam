@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -20,6 +21,13 @@ class VanishSound:
         os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
         self.process = None
         self.ffplay = None
+        self.use_afplay = sys.platform == "darwin"
+        if self.use_afplay:
+            self.ffplay = shutil.which("afplay")
+            if self.ffplay is None:
+                raise RuntimeError("Il comando afplay di macOS non è disponibile.")
+            return
+
         try:
             from pygame import mixer
         except ImportError:
@@ -44,9 +52,14 @@ class VanishSound:
             if self.process is not None and self.process.poll() is None:
                 self.process.terminate()
             try:
+                command = (
+                    [self.ffplay, str(self.path)]
+                    if self.use_afplay
+                    else [self.ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet",
+                          "-i", str(self.path)]
+                )
                 self.process = subprocess.Popen(
-                    [self.ffplay, "-nodisp", "-autoexit", "-loglevel", "quiet",
-                     "-i", str(self.path)],
+                    command,
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
