@@ -62,13 +62,17 @@ def configure_logging() -> None:
 
 
 def show_alert(title: str, text: str, buttons: tuple[str, ...]) -> int:
-    from AppKit import NSAlert
+    from AppKit import NSAlert, NSEventModifierFlagCommand
 
     alert = NSAlert.alloc().init()
     alert.setMessageText_(title)
     alert.setInformativeText_(text)
     for label in buttons:
-        alert.addButtonWithTitle_(label)
+        button = alert.addButtonWithTitle_(label)
+        if label == "Quit":
+            # NSAlert's modal loop may disable the application menu shortcuts.
+            button.setKeyEquivalent_("q")
+            button.setKeyEquivalentModifierMask_(NSEventModifierFlagCommand)
     return alert.runModal() - 1000
 
 
