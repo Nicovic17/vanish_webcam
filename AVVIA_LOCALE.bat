@@ -9,7 +9,7 @@ if not exist "%VENV_PY%" (
   echo [Vanish Lab] Creo l'ambiente Python locale...
   where py >nul 2>nul
   if not errorlevel 1 (
-    py -3 -m venv "%VENV_DIR%"
+    py -3.12 -m venv "%VENV_DIR%"
   ) else (
     python -m venv "%VENV_DIR%"
   )

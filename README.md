@@ -56,8 +56,11 @@ libraries. Windows retains MediaPipe 1.0.1 and pygame/ffplay audio.
 
 ## Building and testing
 
-On Windows, use Python 3.12 and run `BUILD_WINDOWS.bat` to create
-`dist/VanishCam.exe`. The existing `.bat` launchers remain available.
+On Windows, put Python 3.12 on PATH (or set `PYTHON_BIN` to its executable) and run
+`BUILD_WINDOWS.bat` to create `dist/VanishCam.exe`. The build uses that interpreter
+instead of the Python launcher's newest installed version. The existing `.bat`
+launchers remain available; the local launcher creates its environment with
+Python 3.12 when using `py`.
 
 Run the camera-free unit suite from the repository root:
 
