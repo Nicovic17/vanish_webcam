@@ -8,11 +8,15 @@ root = Path(SPECPATH).resolve()
 icon_file = root / "assets" / "vanish_icon.ico"
 resources = [
     (root / "hand_landmarker.task", "."),
+    (root / "face_landmarker.task", "."),
     (root / "models" / "gesture_recognizer.task", "models"),
     (root / "models" / "selfie_segmenter_landscape.tflite", "models"),
     (root / "assets" / "substitution_log.png", "assets"),
     (root / "assets" / "vanish.MP3", "assets"),
 ]
+teleport_sound = root / "assets" / "teleport.MP3"
+if teleport_sound.is_file():
+    resources.append((teleport_sound, "assets"))
 missing = [str(path) for path, _ in resources if not path.is_file()]
 if not icon_file.is_file():
     missing.append(str(icon_file))

@@ -5,12 +5,12 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from local_app import vanish_cam as app
-from local_app.naruto_effect import (
+import vanish_cam as app
+from naruto_effect import (
     EFFECT_SECONDS, falling_log_anchor, joined_hands_from_landmarks,
     landed_log_anchor, load_log, overlay_log, render_substitution, substitution_anchor,
 )
-from local_app.test_video_output import arguments
+from test_video_output import arguments
 
 
 class JoinedHandsTests(unittest.TestCase):
@@ -77,7 +77,7 @@ class EffectTests(unittest.TestCase):
         sprite = load_log()
         self.assertEqual(sprite.shape[2], 4)
         self.assertEqual(int(sprite[:, :, 3].min()), 0)
-        self.assertEqual(int(sprite[:, :, 3].max()), 255)
+        self.assertGreaterEqual(int(sprite[:, :, 3].max()), 250)
 
     def test_smoke_animation_leaves_log_behind(self):
         frame = np.full((160, 240, 3), 130, np.uint8)
@@ -130,46 +130,42 @@ class MenuTests(unittest.TestCase):
             self.assertEqual(app.choose_mode(), "naruto")
             key.return_value = ord("1")
             self.assertEqual(app.choose_mode(), "normal")
+            for number, mode in ((3, "particles"), (4, "goku"), (5, "piccolo"),
+                                 (6, "burn"), (7, "whoosh"), (8, "electric")):
+                key.return_value = ord(str(number))
+                self.assertEqual(app.choose_mode(), mode)
+
+    def test_headless_menu_uses_console_only(self):
+        with patch("builtins.input", return_value="8"), patch("builtins.print"), \
+                patch.object(app.cv2, "namedWindow", side_effect=AssertionError("No headless GUI")):
+            self.assertEqual(app.choose_mode(headless=True), "electric")
 
 
 class NarutoVideoLoopTests(unittest.TestCase):
     def test_effect_is_sent_to_preview_and_virtual_camera(self):
-        frames = [np.full((80, 120, 3), v, np.uint8) for v in (10, 40, 80, 120, 160)]
-        capture = Mock()
-        capture.read.side_effect = [(True, frame) for frame in frames]
-        segmenter, recognizer = Mock(), Mock()
-        recognizer.recognize_joined_hands.return_value = True
-        sound = Mock()
-        virtual = Mock(width=120, height=80)
-        preview = []
-        with ExitStack() as mocks:
-            mocks.enter_context(patch.object(app, "parse_args", return_value=arguments(mode="naruto")))
-            mocks.enter_context(patch.object(app, "download_models"))
-            mocks.enter_context(patch.object(app, "open_camera", return_value=capture))
-            mocks.enter_context(patch.object(app, "create_tasks", return_value=(segmenter, recognizer)))
-            mocks.enter_context(patch.object(app, "VanishSound", return_value=sound))
-            mocks.enter_context(patch.object(app, "open_virtual_camera", return_value=virtual))
-            mocks.enter_context(patch.object(app, "person_mask", return_value=np.ones((80, 120), np.float32)))
-            mocks.enter_context(patch.object(app.time, "perf_counter", side_effect=(
-                0, 0, 0.1, 4.1, 4.3, 4.35, 4.40, 4.42, 5.05, 5.1, 5.9,
-            )))
-            mocks.enter_context(patch.object(app.cv2, "namedWindow"))
-            mocks.enter_context(patch.object(app.cv2, "resizeWindow"))
-            mocks.enter_context(patch.object(app.cv2, "destroyAllWindows"))
-            mocks.enter_context(patch.object(app.cv2, "imshow", side_effect=lambda name, frame: preview.append(frame.copy())))
-            mocks.enter_context(patch.object(app.cv2, "waitKey", side_effect=(0, 0, 0, 0, ord("q"))))
-            mocks.enter_context(patch.object(app.cv2, "putText", side_effect=AssertionError("Overlay vietato")))
-            mocks.enter_context(patch("builtins.print"))
-            self.assertEqual(app.run(), 0)
-        self.assertEqual(len(preview), 5)
-        for sent, shown in zip(virtual.send.call_args_list, preview):
-            np.testing.assert_array_equal(sent.args[0], shown)
-        self.assertTrue(np.any(preview[2] != frames[2]))
-        self.assertTrue(np.any(preview[3] != frames[3]))
-        self.assertTrue(np.any(preview[4] != frames[1]))  # Tronco persistente.
-        recognizer.recognize_joined_hands.assert_called_once()
-        sound.play.assert_called_once()
-        sound.close.assert_called_once()
+        from test_video_output import mock_video
+        result = mock_video(mode="naruto")
+        self.assertEqual(len(result.sent), len(result.shown))
+        for rgb, preview in zip(result.sent, result.shown):
+            np.testing.assert_array_equal(rgb, app.cv2.cvtColor(preview, app.cv2.COLOR_BGR2RGB))
+        self.assertFalse(np.array_equal(result.shown[-1], result.raw[-1]))
+        result.sound.play.assert_called_once()
+
+    def test_r_restores_live_video_and_removes_log(self):
+        from test_video_output import mock_video
+        result = mock_video(mode="naruto", keys=[0, ord("v")] + [0] * 12 + [ord("r"), 0, ord("q")])
+        np.testing.assert_array_equal(result.shown[-1], result.raw[-1])
+
+    def test_cached_smoke_is_deterministic_and_reverse_seek_safe(self):
+        frame = np.full((160, 240, 3), 130, np.uint8)
+        background = np.full_like(frame, 35)
+        mask = np.ones(frame.shape[:2], np.float32)
+        cache, smoke = {}, {}
+        sprite = load_log()
+        reference = render_substitution(frame, background, mask, sprite, (120, 85, 100), .35, cache, smoke)
+        render_substitution(frame, background, mask, sprite, (120, 85, 100), 1.0, cache, smoke)
+        actual = render_substitution(frame, background, mask, sprite, (120, 85, 100), .35, cache, smoke)
+        np.testing.assert_array_equal(reference, actual)
 
 
 if __name__ == "__main__":

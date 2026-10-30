@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -57,6 +58,11 @@ def load_log() -> np.ndarray:
     sprite = cv2.imread(str(LOG_PATH), cv2.IMREAD_UNCHANGED)
     if sprite is None or sprite.ndim != 3 or sprite.shape[2] != 4:
         raise RuntimeError(f"Sprite del tronco non disponibile: {LOG_PATH}")
+    # Decode once at startup; avoid repeatedly shrinking the large source asset
+    # during the first animated frames. 720px exceeds the default displayed size.
+    if sprite.shape[0] > 720:
+        sprite = cv2.resize(sprite, (round(sprite.shape[1] * 720 / sprite.shape[0]), 720),
+                            interpolation=cv2.INTER_AREA)
     return sprite
 
 
@@ -70,7 +76,7 @@ def overlay_log(frame: np.ndarray, sprite: np.ndarray, anchor: tuple[int, int, i
     width = max(1, int(height * sprite.shape[1] / sprite.shape[0]))
     sized = cache.get(height) if cache is not None else None
     if sized is None:
-        sized = cv2.resize(sprite, (width, height), interpolation=cv2.INTER_AREA)
+        sized = cv2.resize(sprite, (width, height), interpolation=cv2.INTER_LINEAR)
         if cache is not None:
             cache[height] = sized
     x1, y1 = cx - width // 2, cy - height // 2
@@ -80,13 +86,9 @@ def overlay_log(frame: np.ndarray, sprite: np.ndarray, anchor: tuple[int, int, i
     if left >= right or top >= bottom:
         return
     part = sized[top - y1:bottom - y1, left - x1:right - x1]
-    alpha = (part[:, :, 3:4].astype(np.float32) / 255.0) * opacity
+    alpha = (part[:, :, 3].astype(np.float32) / 255.0) * opacity
     destination = frame[top:bottom, left:right]
-    destination[:] = np.clip(
-        part[:, :, :3].astype(np.float32) * alpha
-        + destination.astype(np.float32) * (1.0 - alpha),
-        0, 255,
-    ).astype(np.uint8)
+    cv2.blendLinear(part[:, :, :3], destination, alpha, 1.0 - alpha, dst=destination)
 
 
 def landed_log_anchor(anchor: tuple[int, int, int], frame_height: int) -> tuple[int, int, int]:
@@ -113,12 +115,19 @@ def falling_log_anchor(anchor: tuple[int, int, int], frame_height: int,
     return cx, floor_y - round(bounce), size
 
 
+@lru_cache(maxsize=2)
+def _smoke_parameters(foreground):
+    rng = np.random.default_rng(9127 if foreground else 1934)
+    return tuple((rng.uniform(0, 2 * math.pi), rng.uniform(.25, 1),
+                  rng.uniform(.09, .20), rng.uniform(-25, 25))
+                 for _ in range(22 if foreground else 18))
+
+
 def _smoke_layer(frame: np.ndarray, anchor: tuple[int, int, int],
-                 age: float, foreground: bool) -> None:
+                 age: float, foreground: bool, cache=None) -> None:
     if age >= EFFECT_SECONDS:
         return
     cx, cy, size = anchor
-    rng = np.random.default_rng(9127 if foreground else 1934)
     reveal = min(1.0, age / 0.16)
     fade = max(0.0, 1.0 - max(0.0, age - 0.33) / 1.12)
     if fade <= 0:
@@ -131,17 +140,35 @@ def _smoke_layer(frame: np.ndarray, anchor: tuple[int, int, int],
     bottom = min(frame.shape[0], cy + margin + 1)
     if left >= right or top >= bottom:
         return
-    layer = np.zeros((bottom - top, right - left, 4), dtype=np.uint8)
+    # Draw smoke at half resolution; keep the camera and log at full resolution.
+    output_left, output_top = left, top
+    output_width, output_height = right - left, bottom - top
+    cx, cy = (cx - left) * .5, (cy - top) * .5
+    size *= .5
+    left = top = 0
+    shape = (max(1, (output_height + 1) // 2), max(1, (output_width + 1) // 2), 4)
+    key = (foreground, shape)
+    layer = cache.get(key) if cache is not None else None
+    if layer is None:
+        layer = np.zeros(shape, dtype=np.uint8)
+        if cache is not None:
+            cache[key] = layer
+    else:
+        layer.fill(0)
     radius = size * (0.27 + 0.54 * min(age, 1.0))
-    for _ in range(22 if foreground else 18):
-        angle = rng.uniform(0, 2 * math.pi)
-        distance = radius * rng.uniform(0.25, 1.0)
-        x = int(cx + math.cos(angle) * distance) - left
+    for angle, distance_fraction, puff_fraction, rotation in _smoke_parameters(foreground):
+        distance = radius * distance_fraction
+        x = int(cx + math.cos(angle + age*.12) * distance + math.sin(age*3+angle)*size*.025) - left
         y = int(cy + math.sin(angle) * distance * 0.63 - age * size * 0.13) - top
-        puff = max(2, int(size * rng.uniform(0.09, 0.20) * (0.7 + age * 0.7)))
+        puff = max(2, int(size * puff_fraction * (0.7 + age * 0.7)))
         color = (229, 235, 235, 190) if foreground else (152, 162, 166, 125)
         cv2.ellipse(layer, (x, y), (puff, int(puff * 0.68)),
-                    rng.uniform(-25, 25), 0, 360, color, -1, cv2.LINE_AA)
+                    rotation, 0, 360, color, -1, cv2.LINE_AA)
+        # Nested lobes give the cloud volume rather than flat overlapping discs.
+        highlight = (245, 248, 247, 205) if foreground else (183, 193, 195, 145)
+        cv2.ellipse(layer, (x - puff // 5, y - puff // 4),
+                    (max(1, puff * 2 // 3), max(1, puff // 3)), rotation,
+                    0, 360, highlight, -1, cv2.LINE_AA)
     # Long white winding smoke ribbons echo the supplied anime reference.
     for direction in (-1, 1):
         center = (int(cx + direction * size * 0.13) - left,
@@ -150,23 +177,28 @@ def _smoke_layer(frame: np.ndarray, anchor: tuple[int, int, int],
                 max(2, int(size * (0.09 + age * 0.12))))
         cv2.ellipse(layer, center, axes, direction * 15, 20, 230,
                     (244, 247, 245, 220), max(2, int(size * 0.025)), cv2.LINE_AA)
+    # Small edge diffusion preserves the anime cloud shape without hard cutouts.
+    cv2.GaussianBlur(layer, (5, 5), 1.1, dst=layer)
     occupied = cv2.findNonZero(layer[:, :, 3])
     if occupied is None:
         return
     x, y, width, height = cv2.boundingRect(occupied)
-    destination = frame[top + y:top + y + height, left + x:left + x + width]
-    layer = layer[y:y + height, x:x + width]
-    alpha = (layer[:, :, 3:4].astype(np.float32) / 255.0) * reveal * fade
-    destination[:] = np.clip(
-        layer[:, :, :3].astype(np.float32) * alpha
-        + destination.astype(np.float32) * (1.0 - alpha),
-        0, 255,
-    ).astype(np.uint8)
+    left, top = output_left + x * 2, output_top + y * 2
+    width_out = min(width * 2, output_width - x * 2)
+    height_out = min(height * 2, output_height - y * 2)
+    if width_out <= 0 or height_out <= 0:
+        return
+    destination = frame[top:top + height_out, left:left + width_out]
+    layer = cv2.resize(layer[y:y + height, x:x + width], (width_out, height_out),
+                       interpolation=cv2.INTER_LINEAR)
+    alpha = (layer[:, :, 3].astype(np.float32) / 255.0) * reveal * fade
+    cv2.blendLinear(layer[:, :, :3], destination, alpha, 1.0 - alpha, dst=destination)
 
 
 def render_substitution(frame: np.ndarray, background: np.ndarray, mask: np.ndarray,
                         sprite: np.ndarray, anchor: tuple[int, int, int], age: float,
-                        log_cache: dict[int, np.ndarray] | None = None) -> np.ndarray:
+                        log_cache: dict[int, np.ndarray] | None = None,
+                        smoke_cache=None) -> np.ndarray:
     """Quick body replacement, expanding smoke, then a persistent wooden log."""
     if age >= EFFECT_SECONDS:
         output = background.copy()
@@ -176,14 +208,11 @@ def render_substitution(frame: np.ndarray, background: np.ndarray, mask: np.ndar
         output = background.copy()
     else:
         person_alpha = mask * max(0.0, 1.0 - age / 0.13)
-        output = (
-            frame.astype(np.float32) * person_alpha[:, :, None]
-            + background.astype(np.float32) * (1.0 - person_alpha[:, :, None])
-        ).astype(np.uint8)
-    _smoke_layer(output, anchor, age, foreground=False)
+        output = cv2.blendLinear(frame, background, person_alpha, 1.0 - person_alpha)
+    _smoke_layer(output, anchor, age, foreground=False, cache=smoke_cache)
     log_opacity = min(1.0, max(0.0, (age - 0.05) / 0.15))
     moving_anchor = falling_log_anchor(anchor, output.shape[0], age)
     overlay_log(output, sprite, moving_anchor, log_opacity,
                 scale=1.15 - min(age, 0.25) * 0.6, cache=log_cache)
-    _smoke_layer(output, anchor, age, foreground=True)
+    _smoke_layer(output, anchor, age, foreground=True, cache=smoke_cache)
     return output
