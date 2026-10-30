@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from vanish_hud import guidance, draw_guidance
 import argparse
 import os
 import platform
@@ -11,6 +12,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
 from contextlib import ExitStack
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import cv2
@@ -18,19 +20,23 @@ import mediapipe as mp
 import numpy as np
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
+from gesture_detection import victory_score
+from vanish_effects import MODES, DURATIONS, SilhouetteEffect
+from vanish_runtime import InferenceWorker, LatestFrameCapture, Profiler, terminal_key, build_background
+from vanish_vision import VisionProcessor
 
 try:
     from .naruto_effect import (
         EFFECT_SECONDS, joined_hands_from_landmarks, landed_log_anchor,
         load_log, overlay_log, render_substitution, substitution_anchor,
     )
-    from .vanish_sound import SOUND_PATH, VanishSound
+    from .vanish_sound import SOUND_PATH, VanishSound, ProceduralSound
 except ImportError:
     from naruto_effect import (
         EFFECT_SECONDS, joined_hands_from_landmarks, landed_log_anchor,
         load_log, overlay_log, render_substitution, substitution_anchor,
     )
-    from vanish_sound import SOUND_PATH, VanishSound
+    from vanish_sound import SOUND_PATH, VanishSound, ProceduralSound
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -40,6 +46,7 @@ WINDOW_NAME = "Webcam - Anteprima"
 SEGMENTER_MODEL = MODEL_DIR / "selfie_segmenter_landscape.tflite"
 GESTURE_MODEL = MODEL_DIR / "gesture_recognizer.task"
 HAND_MODEL = APP_DIR / "hand_landmarker.task"
+FACE_MODEL = APP_DIR / "face_landmarker.task"
 
 MODEL_URLS = {
     SEGMENTER_MODEL: (
@@ -75,13 +82,20 @@ def positive_fps(value: str) -> float:
     return fps
 
 
+def positive_int(value: str) -> int:
+    number = int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("Value must be positive.")
+    return number
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Scegli Normal Vanish o Naruto Vanish per la webcam."
+        description="Local silhouette effects with automatic virtual-camera output."
     )
     parser.add_argument("--camera", type=int, default=0, help="Indice della webcam")
-    parser.add_argument("--width", type=int, default=960, help="Larghezza video")
-    parser.add_argument("--height", type=int, default=540, help="Altezza video")
+    parser.add_argument("--width", type=positive_int, default=1280, help="Capture width (default: 1280)")
+    parser.add_argument("--height", type=positive_int, default=720, help="Capture height (default: 720)")
     parser.add_argument(
         "--fullscreen", action="store_true", help="Avvia a schermo intero"
     )
@@ -99,7 +113,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--virtual-device", help="Nome del dispositivo virtuale da usare")
     parser.add_argument(
-        "--mode", choices=("normal", "naruto"),
+        "--mode", choices=tuple(item[0] for item in MODES),
         help="Salta il menu iniziale e avvia direttamente la modalità scelta",
     )
     parser.add_argument(
@@ -107,33 +121,47 @@ def parse_args() -> argparse.Namespace:
         help="Stampa nel terminale lo stato del riconoscimento (senza scritte nel video)",
     )
     parser.add_argument("--self-test", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--profile", action="store_true", help="Terminal FPS and mean/p95 stage timings")
+    parser.add_argument("--headless", action="store_true", help="No GUI; virtual camera required, console menu and keys")
+    parser.add_argument("--detection-width", type=positive_int, default=640, help="Inference copy width (default: 640)")
+    parser.add_argument("--detection-light", action="store_true", help="Mild contrast normalization on detection only")
+    parser.add_argument("--gesture-frames", type=positive_int, default=3, help="Consecutive detections to trigger")
+    parser.add_argument("--gesture-release-frames", type=positive_int, default=5, help="Clear misses to rearm gesture")
+    parser.add_argument("--duration", type=float, default=0, help="Stop after this many seconds (0: until Q/ESC/Ctrl+C)")
     return parser.parse_args()
 
 
-def choose_mode() -> str | None:
+def choose_mode(headless=False) -> str | None:
     """Simple keyboard/mouse menu shown before the clean camera feed."""
     title = "Scegli effetto"
     selected = [None]
-    window = np.zeros((420, 700, 3), dtype=np.uint8)
+    if headless:
+        for index, (_, label, detail) in enumerate(MODES, 1):
+            print(f"{index}. {label}: {detail}")
+        while True:
+            answer = input("Choose 1-8 (Q to quit): ").strip().lower()
+            if answer in ("q", "quit"):
+                return None
+            if answer in tuple(str(i) for i in range(1, len(MODES) + 1)):
+                return MODES[int(answer) - 1][0]
+    window = np.zeros((740, 800, 3), dtype=np.uint8)
     window[:] = (26, 29, 34)
     cv2.putText(window, "SCEGLI IL TUO VANISH", (68, 88),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.85, (236, 239, 242), 2, cv2.LINE_AA)
-    buttons = (
-        ("normal", "1  NORMAL VANISH", "Segno a V  /  dissolvenza", 140),
-        ("naruto", "2  NARUTO VANISH", "Mani unite  /  tronco e fumo", 260),
-    )
+    buttons = tuple((mode, f"{index + 1}  {label}", detail, 115 + index * 75)
+                    for index, (mode, label, detail) in enumerate(MODES))
     for mode, heading, detail, top in buttons:
-        cv2.rectangle(window, (65, top), (635, top + 94), (48, 54, 62), -1, cv2.LINE_AA)
-        cv2.rectangle(window, (65, top), (635, top + 94), (111, 142, 153), 2, cv2.LINE_AA)
-        cv2.putText(window, heading, (90, top + 38),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.77, (240, 245, 247), 2, cv2.LINE_AA)
-        cv2.putText(window, detail, (90, top + 68),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.53, (179, 195, 201), 1, cv2.LINE_AA)
+        cv2.rectangle(window, (65, top), (735, top + 65), (48, 54, 62), -1, cv2.LINE_AA)
+        cv2.rectangle(window, (65, top), (735, top + 65), (111, 142, 153), 2, cv2.LINE_AA)
+        cv2.putText(window, heading, (90, top + 27),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.62, (240, 245, 247), 1, cv2.LINE_AA)
+        cv2.putText(window, detail, (90, top + 51),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (179, 195, 201), 1, cv2.LINE_AA)
 
     def on_mouse(event, x, y, flags, userdata):
-        if event == cv2.EVENT_LBUTTONUP and 65 <= x <= 635:
+        if event == cv2.EVENT_LBUTTONUP and 65 <= x <= 735:
             for mode, _, _, top in buttons:
-                if top <= y <= top + 94:
+                if top <= y <= top + 65:
                     selected[0] = mode
 
     cv2.namedWindow(title, cv2.WINDOW_AUTOSIZE)
@@ -142,10 +170,8 @@ def choose_mode() -> str | None:
         while selected[0] is None:
             cv2.imshow(title, window)
             key = cv2.waitKey(30) & 0xFF
-            if key == ord("1"):
-                selected[0] = "normal"
-            elif key == ord("2"):
-                selected[0] = "naruto"
+            if ord("1") <= key < ord("1") + len(MODES):
+                selected[0] = MODES[key - ord("1")][0]
             elif key in (ord("q"), 27):
                 return None
             if cv2.getWindowProperty(title, cv2.WND_PROP_VISIBLE) < 1:
@@ -158,34 +184,64 @@ def choose_mode() -> str | None:
 def open_virtual_camera(args: argparse.Namespace, width: int, height: int):
     if args.virtual_camera is False:
         return None
+    errors = []
+    backends = ([args.virtual_backend] if args.virtual_backend else
+                ["obs", "unitycapture"] if platform.system() == "Windows" else
+                ["v4l2loopback"] if platform.system() == "Linux" else ["obs"])
+    for backend in backends:
+        try:
+            import pyvirtualcam
+            camera = pyvirtualcam.Camera(
+                width=width, height=height, fps=args.fps,
+                fmt=pyvirtualcam.PixelFormat.RGB, backend=backend, device=args.virtual_device)
+            print(f"[Camera] {camera.device}: {width}x{height} at {args.fps:g} FPS. "
+                  "Select this device in your meeting app. Keep OBS Virtual Camera stopped.")
+            return camera
+        except (ImportError, RuntimeError, OSError, ValueError) as error:
+            errors.append(f"{backend}: {error}")
+    message = virtual_camera_help() + "\n" + "\n".join(errors)
+    if args.virtual_camera is True or args.virtual_backend or args.virtual_device or getattr(args, "headless", False):
+        raise RuntimeError(message)
+    print(f"[Camera] {message}\n[Camera] Preview only; other apps cannot receive the effect yet.")
+    return None
+
+
+def virtual_camera_help():
+    if platform.system() != "Windows":
+        return "Install/configure the OBS virtual camera (macOS) or v4l2loopback (Linux), then restart."
+    installed = any((Path(os.environ.get(key, "C:/Program Files")) / "obs-studio/bin/64bit/obs64.exe").is_file()
+                    for key in ("ProgramFiles", "ProgramFiles(x86)"))
+    registered = False
     try:
-        import pyvirtualcam
+        import winreg
+        category = r"CLSID\{860BB310-5D01-11D0-BD3B-00A0C911CE86}\Instance"
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, category) as key:
+            for index in range(winreg.QueryInfoKey(key)[0]):
+                with winreg.OpenKey(key, winreg.EnumKey(key, index)) as device:
+                    try:
+                        name = winreg.QueryValueEx(device, "FriendlyName")[0]
+                        registered |= "obs" in name.lower()
+                    except OSError:
+                        pass
+    except (ImportError, OSError):
+        pass
+    if registered:
+        return ("OBS Virtual Camera is registered but unavailable. Stop Virtual Camera in OBS; "
+                "close other VanishCam instances. Open OBS once, Start Virtual Camera, then Stop it and retry.")
+    if installed:
+        return ("OBS is installed but its virtual camera is not registered. Open OBS once, click Start Virtual Camera, "
+                "then Stop. If missing, run obs-studio/data/obs-plugins/win-dshow/virtualcam-install.bat "
+                "as administrator and restart your meeting app.")
+    return ("Install OBS Studio from https://obsproject.com/download (includes OBS Virtual Camera). "
+            "Open OBS once, Start Virtual Camera, then Stop it. Restart VanishCam and your meeting app. "
+            "Unity Capture is the alternative backend.")
 
-        camera = pyvirtualcam.Camera(
-            width=width, height=height, fps=args.fps,
-            fmt=pyvirtualcam.PixelFormat.BGR,
-            backend=args.virtual_backend, device=args.virtual_device,
-        )
-    except (ImportError, RuntimeError, OSError, ValueError) as error:
-        message = (
-            "Webcam virtuale non disponibile. Installa OBS Studio (con il driver "
-            "OBS Virtual Camera) oppure Unity Capture. Se usi OBS Virtual Camera, "
-            "ferma 'Avvia fotocamera virtuale' in OBS. "
-            "Avvia da AVVIA_LOCALE.bat per installare pyvirtualcam. "
-            f"Dettaglio: {error}"
-        )
-        if args.virtual_camera is True or args.virtual_backend or args.virtual_device:
-            raise RuntimeError(message) from error
-        print(f"[Webcam] {message}\n[Webcam] Proseguo con l'anteprima locale.")
-        return None
-    print(f"[Webcam] Uscita virtuale attiva: {camera.device} ({width}x{height}, {args.fps:g} FPS massimi)")
-    return camera
 
-
-def send_virtual_frame(camera, frame: np.ndarray) -> None:
+def send_virtual_frame(camera, frame: np.ndarray, rgb_buffer=None) -> None:
     if frame.shape[:2] != (camera.height, camera.width):
         frame = cv2.resize(frame, (camera.width, camera.height), interpolation=cv2.INTER_LINEAR)
-    camera.send(np.ascontiguousarray(frame))
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB, dst=rgb_buffer)
+    camera.send(rgb)
 
 
 def download_models(mode: str = "normal") -> None:
@@ -236,6 +292,7 @@ def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
             f"Webcam {index} non disponibile. Chiudi le altre app oppure prova --camera 1."
         )
 
+    capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -395,48 +452,8 @@ def apply_dissolve(
 
 
 def victory_landmark_score(points: np.ndarray) -> float:
-    """Riconosci indice e medio distesi usando distanze 3D, non l'orientamento."""
-    if points.shape != (21, 3) or not np.isfinite(points).all():
-        return 0.0
-
-    straightness = []
-    extended = []
-    folded = []
-    lengths = []
-    # MCP, PIP, DIP e punta: indice, medio, anulare, mignolo.
-    for index, base in enumerate((5, 9, 13, 17)):
-        finger = points[base : base + 4]
-        length = float(np.linalg.norm(np.diff(finger, axis=0), axis=1).sum())
-        if length < 1e-6:
-            if index < 2:
-                return 0.0
-            straightness.append(0.0)
-            lengths.append(0.0)
-            extended.append(False)
-            folded.append(True)
-            continue
-        ratio = float(np.linalg.norm(finger[3] - finger[0])) / length
-        tip_distance = float(np.linalg.norm(finger[3] - points[0]))
-        joint_distance = float(np.linalg.norm(finger[1] - points[0]))
-        straightness.append(ratio)
-        lengths.append(length)
-        extended.append(ratio >= 0.82 and tip_distance > joint_distance * 1.10)
-        folded.append(ratio < 0.78 or tip_distance <= joint_distance * 1.05)
-
-    # Di lato le dita ripiegate possono apparire dritte ma molto corte:
-    # non pretendere articolazioni ben visibili per anulare e mignolo.
-    reference_length = min(lengths[:2])
-    for index, base in ((2, 13), (3, 17)):
-        reach = float(np.linalg.norm(points[base + 3] - points[base]))
-        folded[index] = folded[index] or reach < reference_length * 0.65
-    if not (extended[0] and extended[1] and folded[2] and folded[3]):
-        return 0.0
-    # Le due punte devono essere separate; il pollice puo' restare nascosto.
-    separation = float(np.linalg.norm(points[8] - points[12]))
-    if separation < min(lengths[:2]) * 0.20:
-        return 0.0
-    # Qualita' geometrica delle dita distese, non probabilita' del classificatore.
-    return float(np.clip(min(straightness[:2]), 0.0, 1.0))
+    """Rotation-independent joint-angle and palm-relative V-sign score."""
+    return victory_score(points)
 
 
 def classify_gesture_result(
@@ -633,238 +650,338 @@ def set_fullscreen(enabled: bool) -> None:
 
 
 def self_test() -> int:
-    """Check bundled resources and model initialization without opening a webcam."""
-    required = (SEGMENTER_MODEL, GESTURE_MODEL, HAND_MODEL, SOUND_PATH)
+    """Initialize both worker configurations without opening or recording a camera."""
+    required = (SEGMENTER_MODEL, HAND_MODEL, FACE_MODEL, SOUND_PATH)
     missing = [path.name for path in required if not path.is_file()]
     if missing:
-        raise RuntimeError(f"Risorse mancanti: {', '.join(missing)}")
+        raise RuntimeError(f"Missing resources: {', '.join(missing)}")
     load_log()
-    import pygame.mixer  # The distributed build must contain its MP3 decoder.
-    for mode in ("normal", "naruto"):
-        segmenter, recognizer = create_tasks(mode)
-        try:
-            recognizer.close()
-        finally:
-            segmenter.close()
-    print("[Webcam] Self-test completato: modelli, asset e audio presenti.")
+    from types import SimpleNamespace
+    args = SimpleNamespace(gesture_frames=3, gesture_release_frames=5,
+                           detection_light=False, detection_width=640)
+    for mode in ("normal", "goku"):
+        processor = VisionProcessor(args, mode, Profiler(), SEGMENTER_MODEL, HAND_MODEL, FACE_MODEL)
+        processor.close()
+    from vanish_sound import synthesized_samples
+    for mode in ("burn", "whoosh", "goku"):
+        assert synthesized_samples(mode).shape[1] == 2
+    print("[Webcam] Self-test passed: hand/face models, segmentation, assets and generated audio.")
     return 0
 
 
 def run() -> int:
     args = parse_args()
+    # The default 20 OpenCV threads added substantial scheduling overhead here.
+    cv2.setNumThreads(1)
     if getattr(args, "self_test", False):
         return self_test()
-    mode = args.mode or choose_mode()
+    if args.headless and args.virtual_camera is False:
+        raise ValueError("--headless requires virtual-camera output. Remove --no-virtual-camera.")
+    if not np.isfinite(args.duration) or args.duration < 0:
+        raise ValueError("--duration must be zero or a positive finite number.")
+    mode = args.mode or choose_mode(headless=args.headless)
     if mode is None:
         return 0
     with ExitStack() as resources:
         return run_camera(args, resources, mode)
 
 
+def make_sound(mode):
+    if mode == "normal":
+        return None
+    try:
+        if mode == "naruto":
+            return VanishSound()
+        teleport = APP_DIR / "assets" / "teleport.MP3"
+        if mode == "goku" and teleport.is_file():
+            return VanishSound(teleport)
+        return ProceduralSound(mode)
+    except Exception as error:
+        print(f"[Audio] Sound unavailable; video continues. {error}")
+        return None
+
+
 def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int:
     download_models(mode)
+    profiler = Profiler(args.profile)
     capture = open_camera(args.camera, args.width, args.height)
-    resources.callback(capture.release)
     capture.set(cv2.CAP_PROP_FPS, args.fps)
-    segmenter, recognizer = create_tasks(mode)
-    resources.callback(segmenter.close)
-    resources.callback(recognizer.close)
+    reader = LatestFrameCapture(capture, profiler)
+    resources.callback(reader.close)
+    first = reader.read(timeout=5.0)
+    if first is None:
+        raise RuntimeError("No camera frame received in 5 seconds. Check Windows Camera permissions.")
+    height, width = first.frame.shape[:2]
+    print(f"[Camera] Capture {width}x{height}; requested {args.width}x{args.height} at {args.fps:g} FPS (MJPG requested).")
+    virtual_camera = open_virtual_camera(args, width, height)
+    if virtual_camera is not None:
+        resources.callback(virtual_camera.close)
+    elif args.headless:
+        raise RuntimeError("Headless mode requires a working virtual camera.")
+    worker = InferenceWorker(lambda: VisionProcessor(args, mode, profiler, SEGMENTER_MODEL, HAND_MODEL, FACE_MODEL))
+    resources.callback(worker.close)
+    sound = make_sound(mode)
+    if sound is not None:
+        resources.callback(sound.close)
     log_sprite = load_log() if mode == "naruto" else None
-    vanish_sound = VanishSound() if mode == "naruto" else None
-    if vanish_sound is not None:
-        resources.callback(vanish_sound.close)
-    resources.callback(cv2.destroyAllWindows)
-    cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WINDOW_NAME, args.width, args.height)
-
-    state = AppState(
-        calibration_started=time.perf_counter(), fullscreen=args.fullscreen
-    )
-    if state.fullscreen:
-        set_fullscreen(True)
-
-    background: np.ndarray | None = None
-    background_samples: list[np.ndarray] = []
-    last_mask: np.ndarray | None = None
-    last_mask_at = float("-inf")
-    dissolve_field: np.ndarray | None = None
-    sparkle_noise: np.ndarray | None = None
-    log_anchor: tuple[int, int, int] | None = None
-    log_cache: dict[int, np.ndarray] = {}
-    vanished_frame: np.ndarray | None = None
-    virtual_camera = None
-    virtual_camera_initialized = False
+    log_cache, smoke_cache = {}, {}
+    if not args.headless:
+        resources.callback(cv2.destroyAllWindows)
+        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(WINDOW_NAME, width, height)
+        if args.fullscreen:
+            set_fullscreen(True)
+    rgb_buffer, preview_buffer = np.empty_like(first.frame), np.empty_like(first.frame)
+    state = AppState(calibration_started=time.perf_counter(), fullscreen=args.fullscreen)
+    background = None
+    background_samples = []
+    background_builder = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vanish-background")
+    resources.callback(background_builder.shutdown, wait=True, cancel_futures=True)
+    background_future = None
+    sample_sequence = -1
+    effect = None
+    effect_mask = None
+    effect_frame = None
+    log_anchor = None
+    vanished_frame = None
+    pending = None
+    pending_since = 0.0
+    seen_event = 0
+    start_progress = 0.0
+    last_report = 0.0
     calibration_remaining = None
-    last_gesture_report = 0.0
+    ready_at = None
+    camera_dark = False
+    muted = False
+    notice = None
+    notice_until = 0.0
     started = time.perf_counter()
-    print("[Webcam] Esci dall'inquadratura per 4 secondi: acquisisco lo sfondo.")
-    print("[Webcam] Comandi nella finestra: SPAZIO nuovo sfondo, R riappari, V svanisci, F fullscreen, Q esci.")
-
+    profiler.started = started
+    deadline = started
+    last_frame_at = started
+    print("[Webcam] Step completely out of frame for 4 seconds to capture the background.")
+    print("[Webcam] SPACE: new background | H: help | M: mute | F: fullscreen | Q/ESC: quit.")
+    print("[Webcam] " + ("Goku: hold two fingers together at your forehead for 1 second. Lower hand before repeating."
+                         if mode == "goku" else "V: disappear | R: reappear. Release the gesture before triggering again."))
+    if args.headless:
+        print("[Webcam] Headless: use keys in this terminal; no preview window is created.")
     try:
         while True:
-            ok, camera_frame = capture.read()
-            if not ok:
-                raise RuntimeError("La webcam ha smesso di restituire immagini.")
-
-            if not args.no_mirror:
-                camera_frame = cv2.flip(camera_frame, 1)
-
-            height, width = camera_frame.shape[:2]
-            if not virtual_camera_initialized:
-                virtual_camera = open_virtual_camera(args, width, height)
-                virtual_camera_initialized = True
-                if virtual_camera is not None:
-                    resources.callback(virtual_camera.close)
-            if mode == "normal" and (dissolve_field is None or dissolve_field.shape != (height, width)):
-                dissolve_field, sparkle_noise = make_dissolve_fields(height, width)
-            now = time.perf_counter()
-
-            elapsed_ms = int((now - started) * 1000)
-            mp_image = None
-
+            tick = time.perf_counter()
+            packet = reader.read()
+            if packet is None:
+                time.sleep(.001)
+                continue
+            if tick - packet.captured_at > 2.0:
+                raise RuntimeError("Camera frames are stale. Close other camera apps and restart.")
+            camera_frame = packet.frame
+            dark_now = not np.any(camera_frame[::32, ::32] > 3)
+            if dark_now and not camera_dark:
+                print("[Camera] Image is black. Check the webcam privacy shutter/switch or room lighting.")
+            camera_dark = dark_now
+            if camera_dark and state.phase == "calibrating":
+                state.calibration_started = tick
+                background_samples.clear()
+                if background_future is not None:
+                    background_future.cancel()
+                    background_future = None
+            if camera_frame.shape[:2] != (height, width):
+                raise RuntimeError("Camera resolution changed while running. Restart with the new resolution.")
+            worker.submit(replace(packet, need_mask=bool(pending) or (mode == "normal" and state.phase == "vanishing"),
+                                  prepare_effect=bool(pending)))
+            result = worker.poll()
+            profiler.add("capture_age", max(0, tick - packet.captured_at))
+            fresh = result is not None and tick - result.captured_at < .45
+            mask_fresh = (result is not None and result.mask is not None and
+                          tick - (result.mask_at if result.mask_at is not None else result.captured_at) < .45)
+            if result is not None:
+                profiler.add("detection_age", tick - result.captured_at)
+                if args.gesture_debug and tick - last_report >= 1:
+                    print(f"[Gesture] {result.debug}" + (" STALE" if not fresh else ""))
+                    last_report = tick
+                if result.event_id > seen_event:
+                    seen_event = result.event_id
+                    if tick - result.event_at < 1.5:
+                        if state.phase == "ready":
+                            pending, pending_since = "vanish", result.event_at
+                        elif state.phase == "vanished":
+                            pending, pending_since = "return", result.event_at
             if state.phase == "calibrating":
-                elapsed = now - state.calibration_started
+                elapsed = tick - state.calibration_started
                 remaining = max(0, int(np.ceil(CALIBRATION_SECONDS - elapsed)))
                 if remaining != calibration_remaining:
-                    print(f"[Webcam] Acquisizione sfondo: {remaining} secondi.")
+                    print(f"[Webcam] Background capture: {remaining} seconds.")
                     calibration_remaining = remaining
-                if elapsed >= CALIBRATION_SECONDS - BACKGROUND_SAMPLE_SECONDS:
+                if (background_future is None and elapsed >= CALIBRATION_SECONDS - BACKGROUND_SAMPLE_SECONDS
+                        and packet.sequence != sample_sequence):
                     background_samples.append(camera_frame.copy())
-                if elapsed >= CALIBRATION_SECONDS:
-                    if background_samples:
-                        stack = np.stack(background_samples[-18:], axis=0)
-                        background = np.median(stack, axis=0).astype(np.uint8)
-                    else:
-                        background = camera_frame.copy()
+                    background_samples[:] = background_samples[-18:]
+                    sample_sequence = packet.sequence
+                if elapsed >= CALIBRATION_SECONDS and background_future is None:
+                    background_future = background_builder.submit(
+                        build_background, tuple(background_samples) or (camera_frame.copy(),))
                     background_samples.clear()
+                if background_future is not None and background_future.done():
+                    background = background_future.result()
+                    background_future = None
                     state.phase = "ready"
-                    print("[Webcam] Sfondo pronto. Puoi rientrare nell'inquadratura.")
-                display = camera_frame
-
-            elif background is None:
-                state.phase = "calibrating"
-                state.calibration_started = now
-                display = camera_frame
-
-            elif state.phase == "vanished":
-                if vanished_frame is None:
-                    vanished_frame = background.copy()
-                    if mode == "naruto" and log_anchor is not None:
-                        overlay_log(vanished_frame, log_sprite, landed_log_anchor(log_anchor, height),
-                                    cache=log_cache)
-                display = vanished_frame
-
-            else:
-                mask = last_mask
-                if (
-                    state.phase == "ready"
-                    and now - state.last_gesture_check >=
-                    (0.08 if mode == "naruto" else GESTURE_INTERVAL_SECONDS)
-                ):
-                    state.last_gesture_check = now
-                    rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
-                    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                    if mode == "normal":
-                        name, score = recognize_gesture(recognizer, mp_image, elapsed_ms)
-                        if args.gesture_debug and now - last_gesture_report >= 1.0:
-                            print(
-                                f"[Gesto] {name}, valore={score:.2f}, "
-                                f"ritaglio={recognizer.preferred_crop or 'full'}, "
-                                f"rotazione={recognizer.preferred_rotation or 0}"
-                            )
-                            last_gesture_report = now
-                        start_vanish_on_gesture(state, name, score, now)
+                    ready_at = tick
+                    print("[Webcam] Background ready. Step back into view.")
+            if pending and background is not None and result is not None and result.prepared is not None:
+                prepared = result.prepared
+                if (prepared.captured_at >= pending_since - .001
+                        and tick - prepared.captured_at < 1.5):
+                    effect_frame, effect_mask = prepared.frame, prepared.mask
+                    if mode == "naruto":
+                        log_anchor = prepared.anchor
+                        log_cache.clear()
+                        smoke_cache.clear()
+                        state.phase = "naruto_returning" if pending == "return" else "naruto_vanishing"
                     else:
-                        joined = recognizer.recognize_joined_hands(mp_image, elapsed_ms)
-                        if args.gesture_debug and now - last_gesture_report >= 1.0:
-                            print(f"[Mani] rilevate={recognizer.last_hand_count}, "
-                                  f"unite={joined}, vista={recognizer.preferred_view or 'full'}")
-                            last_gesture_report = now
-                        if start_naruto_on_join(state, joined, time.perf_counter()):
-                            vanish_sound.play()
-
-                if state.phase in ("vanishing", "naruto_vanishing"):
-                    # Normal dissolve tracks the silhouette at 20 Hz; Naruto
-                    # needs it only while the person is still visible.
-                    needs_mask = (
-                        (mode == "normal" and (mask is None or now - last_mask_at >= 0.05))
-                        or (mode == "naruto" and (log_anchor is None or now - state.vanish_started < 0.13))
-                    )
-                    if needs_mask:
-                        if mp_image is None:
-                            rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
-                            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                        mask = person_mask(segmenter, mp_image, elapsed_ms, width, height)
-                        last_mask = mask
-                        last_mask_at = now
-                    if mode == "naruto" and log_anchor is None:
-                        log_anchor = substitution_anchor(mask)
-
-                if mode == "naruto" and state.phase == "naruto_vanishing":
-                    age = max(0.04, time.perf_counter() - state.vanish_started)
-                    display = render_substitution(
-                        camera_frame, background, mask, log_sprite, log_anchor, age, log_cache
-                    )
-                    if age >= EFFECT_SECONDS:
-                        state.phase = "vanished"
-                        vanished_frame = display
-                elif state.phase == "ready":
-                    display = camera_frame
-                else:
-                    progress = 0.0
-                    if state.phase == "vanishing" and state.vanish_started is not None:
-                        progress = min(
-                            1.0, (time.perf_counter() - state.vanish_started) / VANISH_SECONDS
-                        )
-                        if progress >= 1.0:
-                            state.phase = "vanished"
-                    display = apply_dissolve(
-                        camera_frame, background, mask, progress, dissolve_field, sparkle_noise
-                    )
-                    if state.phase == "vanished":
-                        vanished_frame = display
-
-            if virtual_camera is not None:
-                send_virtual_frame(virtual_camera, display)
-            cv2.imshow(WINDOW_NAME, display)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key in (ord("q"), 27):
-                break
-            if key == ord(" "):
-                state.phase = "calibrating"
-                state.calibration_started = now
-                state.vanish_started = None
-                log_anchor = None
-                last_mask = None
-                last_mask_at = float("-inf")
-                vanished_frame = None
-                background_samples.clear()
-                calibration_remaining = None
-                print("[Webcam] Esci dall'inquadratura per 4 secondi: acquisisco il nuovo sfondo.")
-            elif key == ord("r"):
-                if background is not None:
-                    state.phase = "ready"
-                    state.vanish_started = None
+                        effect = prepared.effect
+                        state.phase = "returning" if pending == "return" else "vanishing"
+                    start_progress = 1.0 if pending == "return" else 0.0
+                    state.vanish_started = time.perf_counter()
                     vanished_frame = None
-                    log_anchor = None
-                    last_mask = None
-                    last_mask_at = float("-inf")
-            elif key == ord("v") and background is not None:
-                state.phase = "naruto_vanishing" if mode == "naruto" else "vanishing"
-                state.vanish_started = time.perf_counter()
-                if mode == "naruto":
-                    vanish_sound.play()
-                    log_anchor = None
+                    pending = None
+                    if sound and not muted:
+                        try:
+                            sound.play()
+                        except Exception as error:
+                            muted = True
+                            notice = ("SOUND UNAVAILABLE - VIDEO CONTINUES", "Press M to retry sound", "", 0)
+                            notice_until = tick + 5
+                            print(f"[Audio] Playback failed; muted until M is pressed: {error}")
+                elif tick - pending_since > 1.5:
+                    print("[Gesture] No clear silhouette yet. Lower your hand, step into view, and try again.")
+                    notice = ("NO CLEAR SILHOUETTE", "Lower your hand, stay fully in view, then repeat the sign", "", 0)
+                    notice_until = tick + 5
+                    pending = None
+            elif pending and tick - pending_since > 1.5:
+                print("[Gesture] Waiting for fresh detection; lower your hand, then try again.")
+                notice = ("DETECTION NOT READY", "Lower your hand, keep face and hands visible, then retry", "", 0)
+                notice_until = tick + 5
+                pending = None
+
+            render_start = time.perf_counter()
+            display = camera_frame
+            if state.phase == "vanished":
+                display = vanished_frame if vanished_frame is not None else background
+            elif state.phase in ("naruto_vanishing", "naruto_returning"):
+                returning = state.phase == "naruto_returning"
+                age = time.perf_counter() - state.vanish_started
+                display = render_substitution(effect_frame, background, effect_mask,
+                                              log_sprite, log_anchor, max(0, EFFECT_SECONDS-age) if returning else age, log_cache, smoke_cache)
+                if age >= EFFECT_SECONDS:
+                    state.phase = "ready" if returning else "vanished"
+                    vanished_frame = None if returning else display
+                    if returning:
+                        display = camera_frame
+            elif state.phase in ("vanishing", "returning"):
+                age = time.perf_counter() - state.vanish_started
+                duration = DURATIONS[mode]
+                returning = state.phase == "returning"
+                progress = max(0, start_progress - age / duration) if returning else min(1, start_progress + age / duration)
+                # Normal mode keeps tracking the live silhouette during dissolution.
+                display = effect.render(background, progress,
+                                        live_frame=camera_frame if mode == "normal" and not returning else None,
+                                        live_mask=result.mask if mode == "normal" and not returning and mask_fresh else None)
+                if (returning and progress <= 0) or (not returning and progress >= 1):
+                    state.phase = "ready" if returning else "vanished"
+                    vanished_frame = None if returning else background
+                    if returning:
+                        display = camera_frame
+            profiler.add("render", time.perf_counter() - render_start)
+            send_start = time.perf_counter()
+            if virtual_camera is not None:
+                send_virtual_frame(virtual_camera, display, rgb_buffer)
+            profiler.add("virtual_send", time.perf_counter() - send_start)
+            preview_start = time.perf_counter()
+            if args.headless:
+                key = terminal_key()
+            else:
+                if not args.no_mirror:
+                    preview = cv2.flip(display, 1, dst=preview_buffer)
+                else:
+                    np.copyto(preview_buffer, display)
+                    preview = preview_buffer
+                message = guidance(state.phase, tick-state.calibration_started,
+                                   tick-ready_at if ready_at is not None else 0, mode,
+                                   CALIBRATION_SECONDS, getattr(result, "hold_progress", 0),
+                                   getattr(result, "latched", False))
+                if pending:
+                    message = ("PREPARING EFFECT", "Keep your face and body in view", "", 0)
+                if notice is not None and tick < notice_until:
+                    message = notice
+                if camera_dark:
+                    message = ("CAMERA IMAGE IS BLACK", "Open the webcam privacy shutter/switch; check lighting", "", 0)
+                draw_guidance(preview, message)
+                cv2.imshow(WINDOW_NAME, preview)
+                # Win32 pollKey pumps GUI messages without waitKey's timer delay.
+                key = (cv2.pollKey() if hasattr(cv2, "pollKey") else cv2.waitKey(1)) & 0xFF
+                if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                    break
+            profiler.add("preview", time.perf_counter() - preview_start)
+            if key in (ord("q"), ord("Q"), 27):
+                break
+            now = time.perf_counter()
+            if key == ord(" "):
+                state.phase, state.calibration_started = "calibrating", now
+                state.vanish_started = None
+                background_samples.clear()
+                if background_future is not None:
+                    background_future.cancel()
+                    background_future = None
+                calibration_remaining = None
+                pending = None
+                effect = None
                 vanished_frame = None
-            elif key == ord("f"):
+                log_anchor = None
+                print("[Webcam] Step out of frame for the new background.")
+            elif key in (ord("r"), ord("R")) and mode != "goku" and background is not None:
+                pending = None
+                if mode == "naruto":
+                    state.phase = "ready"
+                    vanished_frame, log_anchor = None, None
+                elif state.phase == "vanished":
+                    pending, pending_since = "return", now
+                elif state.phase == "vanishing":
+                    start_progress = min(1, start_progress + (now - state.vanish_started) / DURATIONS[mode])
+                    state.phase, state.vanish_started = "returning", now
+            elif key in (ord("v"), ord("V")) and mode != "goku" and state.phase == "ready":
+                pending, pending_since = "vanish", now
+            elif key in (ord("h"), ord("H")):
+                ready_at = now
+                notice = None
+                print("[Help] " + dict((item[0], item[2]) for item in MODES)[mode]
+                      + ". Lower your hand, then repeat the sign to return. SPACE: background; M: mute; Q: quit.")
+            elif key in (ord("m"), ord("M")):
+                muted = not muted
+                if muted and sound:
+                    try:
+                        sound.stop()
+                    except Exception as error:
+                        print(f"[Audio] Could not stop current sound: {error}")
+                notice = ("SOUND MUTED" if muted else "SOUND ENABLED", "M toggles sound; H shows gesture help", "", 0)
+                notice_until = now + 2
+                print("[Audio] " + ("Muted" if muted else "Enabled"))
+            elif key in (ord("f"), ord("F")) and not args.headless:
                 state.fullscreen = not state.fullscreen
                 set_fullscreen(state.fullscreen)
-            if virtual_camera is not None:
-                virtual_camera.sleep_until_next_frame()
+            profiler.add("frame_work", time.perf_counter() - tick)
+            profiler.add("output_interval", now - last_frame_at)
+            last_frame_at = now
+            profiler.tick(now)
+            if args.duration and now - started >= args.duration:
+                break
+            deadline += 1.0 / args.fps
+            delay = deadline - time.perf_counter()
+            if delay > 0:
+                time.sleep(delay)
+            else:
+                deadline = time.perf_counter()
     finally:
         resources.close()
-
     return 0
 
 

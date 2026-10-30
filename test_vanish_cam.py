@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 import mediapipe as mp
 
-from local_app.vanish_cam import (
+from vanish_cam import (
     AppState, MultiViewGestureRecognizer, recognize_gesture, start_vanish_on_gesture,
     victory_landmark_score,
 )
@@ -184,9 +184,9 @@ class MultiViewTests(unittest.TestCase):
             SimpleNamespace(recognize_for_video=lambda image, timestamp: self.empty), alternate
         )
         self.assertEqual(recognize_gesture(detector, self.image, 1000)[0], "No_Hand")
-        self.assertEqual(len(calls), 10)
+        self.assertEqual(len(calls), 3)
         recognize_gesture(detector, self.image, 1140)
-        self.assertEqual(len(calls), 10)
+        self.assertEqual(len(calls), 6)
         alternate.recognize = lambda image: self.victory
         self.assertEqual(recognize_gesture(detector, self.image, 1420)[0], "Victory")
         alternate.recognize = lambda image: self.empty
@@ -212,12 +212,154 @@ class MultiViewTests(unittest.TestCase):
             SimpleNamespace(recognize_for_video=lambda image, timestamp: self.empty),
             SimpleNamespace(recognize=recognize),
         )
-        self.assertEqual(recognize_gesture(detector, self.image, 1000)[0], "Victory")
+        self.assertEqual(recognize_gesture(detector, self.image, 1000)[0], "No_Hand")
+        self.assertEqual(recognize_gesture(detector, self.image, 1140)[0], "Victory")
         self.assertEqual(detector.preferred_crop, "lower_left")
         self.assertEqual(detector.preferred_rotation, 0)
         calls.clear()
-        self.assertEqual(recognize_gesture(detector, self.image, 1140)[0], "Victory")
+        self.assertEqual(recognize_gesture(detector, self.image, 1280)[0], "Victory")
         self.assertEqual(calls, [(37, 24)])
+
+
+class GestureSmoothingTests(unittest.TestCase):
+    def test_requires_consecutive_frames_and_clear_release(self):
+        from gesture_detection import GestureGate
+        gate = GestureGate(on_frames=3, off_frames=4)
+        self.assertFalse(gate.update(.95, 0))
+        self.assertFalse(gate.update(.95, .1))
+        self.assertTrue(gate.update(.95, .2))
+        for i, score in enumerate((.95, 0, .95, 0, 0, .95), 3):
+            self.assertFalse(gate.update(score, i / 10))
+        self.assertTrue(gate.latched)
+        for i in range(9, 13):
+            self.assertFalse(gate.update(0, i / 10))
+        self.assertFalse(gate.latched)
+        events = [gate.update(.95, i / 10) for i in range(13, 18)]
+        self.assertEqual(sum(events), 1)
+
+    def test_flickering_candidates_never_trigger(self):
+        from gesture_detection import GestureGate
+        gate = GestureGate()
+        self.assertFalse(any(gate.update(score, i / 30) for i, score in enumerate([.95, 0] * 20)))
+
+    def test_repeated_frame_is_not_counted(self):
+        from gesture_detection import GestureGate
+        gate = GestureGate()
+        self.assertFalse(any(gate.update(.95, 1) for _ in range(20)))
+        self.assertEqual(gate.consecutive, 1)
+
+    def test_stale_gap_breaks_candidate_hold(self):
+        from gesture_detection import GestureGate
+        gate = GestureGate()
+        gate.update(.95, 0)
+        gate.update(.95, .1)
+        self.assertFalse(gate.update(.95, 1))
+
+    def test_goku_requires_one_unbroken_second_and_release(self):
+        from gesture_detection import GestureGate
+        gate = GestureGate(hold_seconds=1)
+        self.assertFalse(any(gate.update(.95, i / 10) for i in range(9)))
+        gate.update(0, .9)
+        self.assertFalse(any(gate.update(.95, i / 10) for i in range(10, 20)))
+        events = [gate.update(.95, i / 10) for i in range(20, 30)]
+        self.assertEqual(sum(events), 1)
+        self.assertTrue(gate.latched)
+
+    def test_nonfinite_confidence_is_rejected(self):
+        from gesture_detection import GestureGate
+        gate = GestureGate()
+        self.assertFalse(any(gate.update(float("nan"), i / 30) for i in range(5)))
+
+
+class MappingAndForeheadTests(unittest.TestCase):
+    def test_landmarks_map_to_full_resolution(self):
+        from gesture_detection import pixel_landmarks
+        result = pixel_landmarks([SimpleNamespace(x=.25, y=.75, z=.1)], 1280, 720)
+        np.testing.assert_allclose(result[0], (320, 540, 128))
+
+    def test_forehead_requires_adjacent_fingers_and_face(self):
+        from gesture_detection import forehead_score
+        world = hand_points()
+        for base, x in ((5, -.1), (9, .1)):
+            world[base:base + 4, 0] = x
+        face = np.zeros((478, 3), np.float32)
+        face[10], face[168] = (640, 110, 0), (640, 180, 0)
+        face[234], face[454] = (540, 200, 0), (740, 200, 0)
+        pixels = world * 30 + (640, 70, 0)
+        pixels[8], pixels[12] = (635, 138, 0), (645, 138, 0)
+        self.assertGreater(forehead_score(pixels, face, world), .62)
+        self.assertEqual(forehead_score(pixels, None, world), 0)
+        moved = pixels.copy()
+        moved[:, :2] += 300
+        self.assertEqual(forehead_score(moved, face, world), 0)
+        world[8, 0] -= 2
+        self.assertEqual(forehead_score(pixels, face, world), 0)
+
+
+class ProceduralEffectTests(unittest.TestCase):
+    def setUp(self):
+        import cv2
+        self.frame = np.full((180, 320, 3), (90, 130, 180), np.uint8)
+        self.background = np.full_like(self.frame, (35, 45, 60))
+        self.mask = np.zeros((180, 320), np.float32)
+        cv2.ellipse(self.mask, (180, 100), (40, 70), 0, 0, 360, 1, -1)
+
+    def test_every_mode_has_exact_endpoints_and_reversible_deterministic_frames(self):
+        from vanish_effects import MODES, SilhouetteEffect
+        for mode, _, _ in MODES:
+            if mode == "naruto":
+                continue
+            with self.subTest(mode=mode):
+                effect = SilhouetteEffect(self.frame, self.mask, mode)
+                np.testing.assert_array_equal(effect.render(self.background, 0), self.frame)
+                middle = effect.render(self.background, .35).copy()
+                self.assertFalse(np.array_equal(middle, self.frame))
+                self.assertFalse(np.array_equal(middle, self.background))
+                np.testing.assert_array_equal(effect.render(self.background, 1), self.background)
+                np.testing.assert_array_equal(effect.render(self.background, .35), middle)
+                np.testing.assert_array_equal(effect.render(self.background, 0), self.frame)
+
+    def test_input_frames_and_masks_are_not_modified(self):
+        from vanish_effects import SilhouetteEffect
+        before, mask_before, background_before = self.frame.copy(), self.mask.copy(), self.background.copy()
+        effect = SilhouetteEffect(self.frame, self.mask, "burn")
+        for p in (.1, .5, .9):
+            output = effect.render(self.background, p)
+            self.assertEqual(output.dtype, np.uint8)
+            self.assertEqual(output.shape, self.frame.shape)
+        np.testing.assert_array_equal(before, self.frame)
+        np.testing.assert_array_equal(mask_before, self.mask)
+        np.testing.assert_array_equal(background_before, self.background)
+
+    def test_silhouette_position_changes_effect_origin(self):
+        from vanish_effects import SilhouetteEffect
+        shifted = np.roll(self.mask, -90, axis=1)
+        first = SilhouetteEffect(self.frame, self.mask, "whoosh")
+        second = SilhouetteEffect(self.frame, shifted, "whoosh")
+        self.assertAlmostEqual(first.cx - second.cx, 90, delta=2)
+        self.assertAlmostEqual(first.head_y, second.head_y, delta=1)
+
+    def test_final_frame_is_clean_at_multiple_resolutions(self):
+        import cv2
+        from vanish_effects import MODES, SilhouetteEffect
+        for width, height in ((160, 120), (640, 360), (1280, 720)):
+            frame = cv2.resize(self.frame, (width, height))
+            mask = cv2.resize(self.mask, (width, height))
+            background = cv2.resize(self.background, (width, height))
+            for mode, _, _ in MODES:
+                if mode != "naruto":
+                    effect = SilhouetteEffect(frame, mask, mode)
+                    np.testing.assert_array_equal(effect.render(background, 1), background)
+
+    def test_generated_sounds_are_bounded_stereo_pcm(self):
+        from vanish_sound import synthesized_samples
+        for mode in ("burn", "whoosh", "goku", "piccolo", "electric"):
+            samples = synthesized_samples(mode)
+            self.assertEqual(samples.dtype, np.int16)
+            self.assertEqual(samples.shape[1], 2)
+            self.assertGreater(np.max(np.abs(samples)), 0)
+            self.assertLess(np.max(np.abs(samples)), 32767)
+            np.testing.assert_array_equal(samples, synthesized_samples(mode))
 
 
 if __name__ == "__main__":

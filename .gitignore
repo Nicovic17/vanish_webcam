@@ -8,3 +8,6 @@ models/
 /build/
 /dist/*
 !/dist/VanishCam.exe
+
+# Local benchmarks and preview images
+/diagnostics/
