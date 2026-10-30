@@ -9,8 +9,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, replace
+from collections.abc import Callable
 from contextlib import ExitStack
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cv2
@@ -633,24 +634,41 @@ def set_fullscreen(enabled: bool) -> None:
 
 
 def self_test() -> int:
-    """Check bundled resources and model initialization without opening a webcam."""
+    """Check bundled resources and both inference pipelines without a webcam."""
     required = (SEGMENTER_MODEL, GESTURE_MODEL, HAND_MODEL, SOUND_PATH)
     missing = [path.name for path in required if not path.is_file()]
     if missing:
         raise RuntimeError(f"Risorse mancanti: {', '.join(missing)}")
     load_log()
-    import pygame.mixer  # The distributed build must contain its MP3 decoder.
+    if platform.system() == "Darwin":
+        sound = VanishSound()
+        sound.close()
+    else:
+        import pygame.mixer  # The Windows build must contain its MP3 decoder.
+    image = mp.Image(
+        image_format=mp.ImageFormat.SRGB,
+        data=np.zeros((240, 320, 3), dtype=np.uint8),
+    )
     for mode in ("normal", "naruto"):
         segmenter, recognizer = create_tasks(mode)
         try:
-            recognizer.close()
+            mask = person_mask(segmenter, image, 0, 320, 240)
+            if mask.shape != (240, 320) or not np.isfinite(mask).all():
+                raise RuntimeError(f"Invalid segmentation output in {mode} mode")
+            if mode == "normal":
+                recognizer.recognize_gesture(image, 0)
+            else:
+                recognizer.recognize_joined_hands(image, 0)
         finally:
-            segmenter.close()
+            try:
+                recognizer.close()
+            finally:
+                segmenter.close()
     print("[Webcam] Self-test completato: modelli, asset e audio presenti.")
     return 0
 
 
-def run() -> int:
+def run(should_quit: Callable[[], bool] | None = None) -> int:
     args = parse_args()
     if getattr(args, "self_test", False):
         return self_test()
@@ -658,10 +676,15 @@ def run() -> int:
     if mode is None:
         return 0
     with ExitStack() as resources:
-        return run_camera(args, resources, mode)
+        return run_camera(args, resources, mode, should_quit)
 
 
-def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int:
+def run_camera(
+    args: argparse.Namespace,
+    resources: ExitStack,
+    mode: str,
+    should_quit: Callable[[], bool] | None = None,
+) -> int:
     download_models(mode)
     capture = open_camera(args.camera, args.width, args.height)
     resources.callback(capture.release)
@@ -701,7 +724,7 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
     print("[Webcam] Comandi nella finestra: SPAZIO nuovo sfondo, R riappari, V svanisci, F fullscreen, Q esci.")
 
     try:
-        while True:
+        while should_quit is None or not should_quit():
             ok, camera_frame = capture.read()
             if not ok:
                 raise RuntimeError("La webcam ha smesso di restituire immagini.")
@@ -830,6 +853,12 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str) -> int
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
+                break
+            try:
+                if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                    break
+            except cv2.error:
+                # Closing a Cocoa/Win32 window can remove it before this query.
                 break
             if key == ord(" "):
                 state.phase = "calibrating"

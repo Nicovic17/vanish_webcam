@@ -14,6 +14,71 @@ If you like this project and want to support it, you can buy me a coffee through
 
 The published EXE may predate the Particles and Goku modes. To use them now, run the local scripts or rebuild the EXE from these sources.
 
+## macOS (Apple silicon)
+
+The macOS build supports Normal Vanish and Naruto Vanish, the modes currently
+implemented in `vanish_cam.py`. It requires an Apple silicon Mac and macOS 14 or
+later. Intel Mac builds are not supported by this build configuration.
+
+To build from a fresh checkout, install Python 3.12, then run:
+
+```sh
+./BUILD_MACOS.command
+```
+
+The script creates an isolated `.venv-macos`, installs dependencies, downloads the
+MediaPipe models, builds `dist/VanishCam.app`, and checks the bundled models and
+assets without opening the camera. Copy the app to Applications; Python is not
+needed to run the built app. The local build is ad-hoc signed. Distribution to
+other Macs may require Developer ID signing and notarization.
+
+Open VanishCam, select an effect, and allow Camera access when macOS asks. After
+the camera opens, step out of frame for 4 seconds to capture an empty background.
+If access was denied, enable VanishCam in **System Settings → Privacy & Security →
+Camera**, then reopen it. No microphone permission is required.
+
+Use **Quit** in the mode chooser, **⌘Q**, or **Q / Esc** in the preview to quit.
+Closing the preview also releases the camera. Click the preview before using
+keyboard controls. Startup errors are shown in a dialog; diagnostic logs are
+written to `~/Library/Logs/VanishCam/VanishCam.log`.
+
+For development, the same platform-aware requirements work on Windows and macOS:
+
+```sh
+python3.12 -m venv .venv-macos
+.venv-macos/bin/python -m pip install -r requirements.txt
+.venv-macos/bin/python macos_launcher.py
+```
+
+macOS uses MediaPipe 0.10.35 because 1.0.1 aborts while opening its detection graph
+on Apple silicon. Sound plays through native `NSSound` to avoid conflicting SDL
+libraries. Windows retains MediaPipe 1.0.1 and pygame/ffplay audio.
+
+## Building and testing
+
+On Windows, put Python 3.12 on PATH (or set `PYTHON_BIN` to its executable) and run
+`BUILD_WINDOWS.bat` to create `dist/VanishCam.exe`. The build uses that interpreter
+instead of the Python launcher's newest installed version. The existing `.bat`
+launchers remain available; the local launcher creates its environment with
+Python 3.12 when using `py`.
+
+Run the camera-free unit suite from the repository root:
+
+```sh
+python -m unittest discover -v
+```
+
+After installing dependencies and downloading models, check real model inference:
+
+```sh
+python -c "from vanish_cam import download_models; download_models()"
+python vanish_cam.py --self-test
+```
+
+The GitHub Actions workflow runs the tests, model checks, and packaged build
+checks on Windows and Apple silicon macOS. Live gestures, camera permission
+prompts, and OBS output still need a manual check with real hardware.
+
 ## Getting started
 
 1. Double-click `AVVIA_LOCALE.bat`.
@@ -31,10 +96,8 @@ The published EXE may predate the Particles and Goku modes. To use them now, run
 To start a mode without the menu:
 
 ```powershell
-local_app\AVVIA_LOCALE.bat --mode naruto
-local_app\AVVIA_LOCALE.bat --mode normal
-local_app\AVVIA_LOCALE.bat --mode particles
-local_app\AVVIA_LOCALE.bat --mode goku
+.\AVVIA_LOCALE.bat --mode naruto
+.\AVVIA_LOCALE.bat --mode normal
 ```
 
 ## Virtual camera and OBS
@@ -44,10 +107,16 @@ If [OBS Studio](https://obsproject.com/) is installed, the app automatically tri
 To use the effect in an OBS scene, run `AVVIA_OBS.bat`, add a **Window Capture** source, select **Webcam - Anteprima**, and then start the virtual camera from OBS. Alternatively, use [Unity Capture](https://github.com/schellingb/UnityCapture) as a separate virtual video source:
 
 ```powershell
-local_app\AVVIA_VIRTUAL.bat --virtual-backend unitycapture
+.\AVVIA_VIRTUAL.bat --virtual-backend unitycapture
 ```
 
 OBS has only one virtual camera. Do not use it as both an OBS input and output at the same time. See the [pyvirtualcam documentation](https://github.com/letmaik/pyvirtualcam#supported-virtual-cameras).
+
+On macOS, install OBS Studio 30 or later, start and stop its virtual camera once,
+and close OBS before selecting a VanishCam mode. The app then automatically tries
+to publish to **OBS Virtual Camera**, falling back to the local preview if the
+driver is unavailable. See [pyvirtualcam's macOS setup](https://github.com/letmaik/pyvirtualcam#macos-obs).
+The Windows-only Unity Capture backend is not available on macOS.
 
 ## Controls
 
@@ -62,7 +131,7 @@ The `V` and `R` keys are disabled in Goku mode.
 You can change the camera, resolution, and maximum virtual-output FPS:
 
 ```powershell
-local_app\AVVIA_LOCALE.bat --camera 1 --width 1280 --height 720 --fps 30
+.\AVVIA_LOCALE.bat --camera 1 --width 1280 --height 720 --fps 30
 ```
 
 To troubleshoot gesture recognition without adding text to the video, pass `--gesture-debug`. Diagnostic information appears only in the terminal.
