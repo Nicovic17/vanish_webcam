@@ -1,0 +1,52 @@
+name: Windows and macOS builds
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / Python 3.12
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15]
+    env:
+      PYGAME_HIDE_SUPPORT_PROMPT: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt "pyinstaller>=6.22,<7"
+      - name: Check dependency compatibility
+        run: python -m pip check
+      - name: Unit tests (no camera or audio device required)
+        run: python -m unittest discover -v
+      - name: Download models
+        run: python -c "from vanish_cam import download_models; download_models()"
+      - name: Model and asset smoke test
+        run: python vanish_cam.py --self-test
+      - name: Build Windows executable
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: BUILD_WINDOWS.bat
+      - name: Build macOS application
+        if: runner.os == 'macOS'
+        run: python -m PyInstaller --noconfirm VanishCam-macOS.spec
+      - name: Verify macOS application
+        if: runner.os == 'macOS'
+        run: |
+          codesign --verify --deep --strict dist/VanishCam.app
+          dist/VanishCam.app/Contents/MacOS/VanishCam --self-test

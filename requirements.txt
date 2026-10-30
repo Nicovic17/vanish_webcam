@@ -1,5 +1,9 @@
-mediapipe==1.0.1
+mediapipe==1.0.1; sys_platform != 'darwin'
+# 1.0.1 aborts in DrishtiMetalHelper on Apple silicon, even with the CPU delegate.
+mediapipe==0.10.35; sys_platform == 'darwin'
 opencv-contrib-python>=4.14,<6
 numpy>=2.0,<3
 pyvirtualcam>=0.15,<1
-pygame>=2.6,<3
+pygame>=2.6,<3; sys_platform != 'darwin'
+pyobjc-framework-Cocoa==13.0; sys_platform == 'darwin'
+pyobjc-framework-AVFoundation==13.0; sys_platform == 'darwin'

@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np
 
-from local_app import vanish_cam as app
+import vanish_cam as app
 
 
 def arguments(**overrides):
@@ -62,7 +62,8 @@ class VirtualCameraTests(unittest.TestCase):
 
 
 class VideoLoopTests(unittest.TestCase):
-    def run_mock_video(self, send_error=None, gesture=("No_Hand", 0.0)):
+    def run_mock_video(self, send_error=None, gesture=("No_Hand", 0.0),
+                       should_quit=None, window_visibility=1):
         capture = Mock()
         frames = [np.full((24, 40, 3), color, np.uint8) for color in (10, 40, 80, 120, 160)]
         capture.read.side_effect = [(True, frame) for frame in frames]
@@ -86,10 +87,11 @@ class VideoLoopTests(unittest.TestCase):
             mocks.enter_context(patch.object(app.cv2, "imshow", side_effect=lambda name, frame: displayed.append(frame.copy())))
             keys = (0, 0, ord("v") if gesture[0] != "Victory" else 0, 0, ord("q"))
             mocks.enter_context(patch.object(app.cv2, "waitKey", side_effect=keys))
+            mocks.enter_context(patch.object(app.cv2, "getWindowProperty", return_value=window_visibility))
             mocks.enter_context(patch.object(app.cv2, "putText", side_effect=AssertionError("Overlay vietato")))
             mocks.enter_context(patch("builtins.print"))
             if send_error is None:
-                self.assertEqual(app.run(), 0)
+                self.assertEqual(app.run(should_quit=should_quit), 0)
             else:
                 with self.assertRaisesRegex(RuntimeError, "send failed"):
                     app.run()
@@ -120,6 +122,18 @@ class VideoLoopTests(unittest.TestCase):
 
     def test_all_devices_close_on_send_error(self):
         self.run_mock_video(send_error=RuntimeError("send failed"))
+
+    def test_app_quit_releases_all_resources(self):
+        _, camera, displayed = self.run_mock_video(
+            should_quit=Mock(side_effect=(False, True))
+        )
+        self.assertEqual(len(displayed), 1)
+        camera.close.assert_called_once()
+
+    def test_window_close_releases_all_resources(self):
+        _, camera, displayed = self.run_mock_video(window_visibility=0)
+        self.assertEqual(len(displayed), 1)
+        camera.close.assert_called_once()
 
 
 if __name__ == "__main__":
