@@ -1,3 +1,7 @@
+## ☕ Buy me a coffee
+
+If you like this project and want to support it, you can buy me a coffee through [PayPal](https://paypal.me/nicovic17) or [Revolut](https://revolut.me/nicoauriemma).
+
 # VanishCam — webcam disappearance effects
 
 Video is processed on your computer. It is neither recorded nor sent to a server. The preview window and virtual camera show only the video and effects, without overlaid menus, instructions, or text.
@@ -16,10 +20,6 @@ the licensed full EXE reports its session mode as `full`, so a valid license
 does not stop renewing while that effect runs.
 
 For step-by-step instructions in English and Italian, see the [user guide](USER_GUIDE_EN_IT.md).
-
-## ☕ Buy me a coffee
-
-If you like this project and want to support it, you can buy me a coffee through [PayPal](https://paypal.me/nicovic17) or [Revolut](https://revolut.me/nicoauriemma).
 
 ## Windows executables
 
