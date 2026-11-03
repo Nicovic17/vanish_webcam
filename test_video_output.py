@@ -1,8 +1,10 @@
 import argparse
 import unittest
 from contextlib import ExitStack
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import numpy as np
 
@@ -62,6 +64,92 @@ class VirtualCameraTests(unittest.TestCase):
 
 
 class MenuTests(unittest.TestCase):
+    def test_camera_selector_previews_and_switches_devices(self):
+        cameras = [Mock(), Mock()]
+        for camera in cameras:
+            camera.read.return_value = (True, np.zeros((24, 40, 3), np.uint8))
+        with patch.object(app, "open_camera", side_effect=cameras) as opening, \
+             patch.object(app.cv2, "namedWindow"), \
+             patch.object(app.cv2, "setMouseCallback"), \
+             patch.object(app.cv2, "imshow"), \
+             patch.object(app.cv2, "destroyWindow"), \
+             patch.object(app.cv2, "getWindowProperty", return_value=1), \
+             patch.object(app.cv2, "waitKey", side_effect=(ord("1"), 13)):
+            self.assertEqual(app.choose_camera(), 1)
+        opening.assert_has_calls((call(0, 640, 360), call(1, 640, 360)))
+        for camera in cameras:
+            camera.release.assert_called_once()
+
+    def test_camera_selector_waits_for_an_available_device(self):
+        camera = Mock()
+        camera.read.return_value = (True, np.zeros((24, 40, 3), np.uint8))
+        with patch.object(app, "open_camera", side_effect=(RuntimeError("missing"), camera)), \
+             patch.object(app.cv2, "namedWindow"), \
+             patch.object(app.cv2, "setMouseCallback"), \
+             patch.object(app.cv2, "imshow"), \
+             patch.object(app.cv2, "destroyWindow"), \
+             patch.object(app.cv2, "getWindowProperty", return_value=1), \
+             patch.object(app.cv2, "waitKey", side_effect=(13, ord("1"), 13)):
+            self.assertEqual(app.choose_camera(), 1)
+        camera.release.assert_called_once()
+
+    def test_camera_selector_waits_for_first_preview_frame(self):
+        camera = Mock()
+        camera.read.side_effect = (
+            (False, None),
+            (True, np.zeros((24, 40, 3), np.uint8)),
+        )
+        with patch.object(app, "open_camera", return_value=camera), \
+             patch.object(app.cv2, "namedWindow"), \
+             patch.object(app.cv2, "setMouseCallback"), \
+             patch.object(app.cv2, "imshow"), \
+             patch.object(app.cv2, "destroyWindow"), \
+             patch.object(app.cv2, "getWindowProperty", return_value=1), \
+             patch.object(app.cv2, "waitKey", side_effect=(13, 13)):
+            self.assertEqual(app.choose_camera(), 0)
+        self.assertEqual(camera.read.call_count, 2)
+        camera.release.assert_called_once()
+
+    def test_packaged_edition_limits_available_modes(self):
+        with TemporaryDirectory() as directory:
+            edition_file = Path(directory) / "edition.txt"
+            for edition, expected in app.EDITION_MODES.items():
+                edition_file.write_text(edition, encoding="utf-8")
+                self.assertEqual(app.edition_modes(edition_file), expected)
+            edition_file.write_text("unknown", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "Edizione non riconosciuta"):
+                app.edition_modes(edition_file)
+
+    def test_single_mode_edition_starts_without_a_menu(self):
+        with patch.object(app, "edition_modes", return_value=("naruto",)), \
+             patch.object(app, "parse_args", return_value=arguments(mode=None)), \
+             patch.object(app, "choose_mode") as menu, \
+             patch.object(app, "choose_camera") as camera_menu, \
+             patch.object(app, "run_camera", return_value=0) as camera:
+            self.assertEqual(app.run(), 0)
+        menu.assert_not_called()
+        camera_menu.assert_not_called()
+        self.assertEqual(camera.call_args.args[2], "naruto")
+
+    def test_run_uses_selected_camera_when_not_set_on_command_line(self):
+        args = arguments(mode=None, camera=None)
+        with patch.object(app, "edition_modes", return_value=("goku",)), \
+             patch.object(app, "parse_args", return_value=args), \
+             patch.object(app, "choose_camera", return_value=2) as menu, \
+             patch.object(app, "choose_goku_delay", return_value=0.5), \
+             patch.object(app, "run_camera", return_value=0) as camera:
+            self.assertEqual(app.run(), 0)
+        menu.assert_called_once_with(mirror=False)
+        self.assertEqual(camera.call_args.args[0].camera, 2)
+        self.assertEqual(camera.call_args.args[0].goku_delay, 0.5)
+
+    def test_combined_edition_menu_has_only_normal_and_particles(self):
+        with patch.object(app.cv2, "namedWindow"), patch.object(app.cv2, "setMouseCallback"), \
+             patch.object(app.cv2, "imshow"), patch.object(app.cv2, "destroyWindow"), \
+             patch.object(app.cv2, "waitKey", return_value=ord("2")), \
+             patch.object(app.cv2, "getWindowProperty", return_value=1):
+            self.assertEqual(app.choose_mode(("normal", "particles")), "particles")
+
     def test_particles_can_be_selected_with_three(self):
         with patch.object(app.cv2, "namedWindow"), patch.object(app.cv2, "setMouseCallback"), \
              patch.object(app.cv2, "imshow"), patch.object(app.cv2, "destroyWindow"), \
