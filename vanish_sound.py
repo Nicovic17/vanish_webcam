@@ -59,10 +59,16 @@ class VanishSound:
         if self.sound.play() is None:
             raise RuntimeError("Impossibile avviare l'audio di sparizione: nessun canale libero.")
 
-    def close(self) -> None:
+    def stop(self) -> None:
         if self.ffplay is not None:
             if self.process is not None and self.process.poll() is None:
                 self.process.terminate()
+            return
+        self.sound.stop()
+
+    def close(self) -> None:
+        self.stop()
+        if self.ffplay is not None:
             return
         if self.owns_mixer:
             self.mixer.quit()

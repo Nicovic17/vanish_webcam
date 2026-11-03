@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from types import SimpleNamespace
 
 import cv2
@@ -74,6 +75,11 @@ class GokuGestureGate:
     hold_started: float | None = None
     last_seen: float | None = None
     release_started: float | None = None
+    hold_seconds: float = HOLD_SECONDS
+
+    def __post_init__(self):
+        if not math.isfinite(self.hold_seconds) or self.hold_seconds <= 0:
+            raise ValueError('Il tempo di mantenimento deve essere positivo e finito.')
 
     def update(self, pose: bool, now: float) -> bool:
         if not pose:
@@ -93,7 +99,7 @@ class GokuGestureGate:
         if self.hold_started is None:
             self.hold_started = now
         self.last_seen = now
-        if now - self.hold_started < HOLD_SECONDS:
+        if now < self.hold_started + self.hold_seconds:
             return False
         self.armed = False
         self.hold_started = None

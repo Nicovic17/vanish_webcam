@@ -1,5 +1,9 @@
 import time
 from pathlib import Path
+try:
+    from .license_client import LicenseError, activate_license, show_license_error
+except ImportError:
+    from license_client import LicenseError, activate_license, show_license_error
 
 import cv2
 import mediapipe as mp
@@ -827,7 +831,7 @@ def overlay_meme_on_face(frame, meme, face_box):
     )
 
 
-def main():
+def run_meme(license_session):
     memes = {
         "two_hands": load_meme(MEME_PATH),
         "hearing": load_meme(HEARING_MEME_PATH),
@@ -900,6 +904,7 @@ def main():
 
     try:
         while True:
+            license_session.ensure_valid()
             if pending_frame is not None:
                 frame = pending_frame
                 pending_frame = None
@@ -1096,6 +1101,7 @@ def main():
             )
 
             # Lo stesso frame mostrato a schermo viene pubblicato come webcam.
+            license_session.ensure_valid()
             virtual_camera.send(frame)
             cv2.imshow(WINDOW_NAME, frame)
 
@@ -1110,6 +1116,17 @@ def main():
         cv2.destroyAllWindows()
         face_landmarker.close()
         hand_landmarker.close()
+
+
+def main():
+    try:
+        session = activate_license()
+        if session is not None:
+            with session:
+                session.backend.mode = "meme"
+                run_meme(session)
+    except LicenseError as error:
+        show_license_error(error)
 
 
 if __name__ == "__main__":

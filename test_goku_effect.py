@@ -97,6 +97,22 @@ class GokuPoseTests(unittest.TestCase):
 
 
 class GokuTimingTests(unittest.TestCase):
+    def test_positive_decimal_hold_times_and_reset(self):
+        for duration in (0.1,0.5,1.5):
+            gate=GokuGestureGate(hold_seconds=duration)
+            self.assertFalse(gate.update(True,0))
+            for now in np.arange(0.05,duration,0.05):
+                self.assertFalse(gate.update(True,float(now)))
+            self.assertTrue(gate.update(True,duration))
+            gate.reset()
+            self.assertEqual(gate.hold_seconds,duration)
+            self.assertFalse(gate.update(True,10))
+
+    def test_invalid_hold_times_rejected(self):
+        for duration in (0,-1,float('nan'),float('inf')):
+            with self.assertRaises(ValueError):
+                GokuGestureGate(hold_seconds=duration)
+
     def test_one_second_and_release_required_for_reappearance(self):
         gate = GokuGestureGate()
         for index in range(10):
