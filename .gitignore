@@ -3,8 +3,27 @@ __pycache__/
 .pytest_cache/
 .venv/
 .venv-local/
-models/
+/models/*
+!/models/blaze_face_short_range.tflite
 *.part
 /build/
 /dist/*
-!/dist/VanishCam.exe
+*.exe
+
+# Local Firebase administrator credentials and environment files.
+/vanishcam-licenses-*.json
+*firebase-adminsdk*.json
+*service-account*.json
+*.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Firebase emulator and Node build artifacts.
+/licensing_backend/node_modules/
+/licensing_backend/.firebase/
+/licensing_backend/.firebase-config/
+/licensing_backend/firestore.rules
+/licensing_backend/*debug.log
+/licensing_backend/npm-debug.log*

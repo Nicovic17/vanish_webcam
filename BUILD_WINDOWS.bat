@@ -15,24 +15,25 @@ if errorlevel 1 (
   if errorlevel 1 goto :error
 )
 
-if not exist "models\gesture_recognizer.task" goto :models
-if not exist "models\selfie_segmenter_landscape.tflite" goto :models
-goto :build
-
-:models
-echo Scarico i modelli MediaPipe necessari...
-py -3 -c "from vanish_cam import download_models; download_models()"
+echo Controllo i modelli MediaPipe necessari...
+py -3 -c "from vanish_cam import download_models; download_models('normal'); download_models('goku')"
 if errorlevel 1 goto :error
 
-:build
 py -3 -m PyInstaller --noconfirm --distpath dist --workpath build VanishCam.spec
 if errorlevel 1 goto :error
 
 "dist\VanishCam.exe" --self-test
 if errorlevel 1 goto :error
+"dist\Naruto Vanish Effect.exe" --self-test
+if errorlevel 1 goto :error
+"dist\Goku Vanish Effect.exe" --self-test
+if errorlevel 1 goto :error
+"dist\Normal and Particles Vanish.exe" --self-test
+if errorlevel 1 goto :error
 
 echo.
-echo Pronto: dist\VanishCam.exe
+echo Pronti in dist: VanishCam.exe, Naruto Vanish Effect.exe,
+echo Goku Vanish Effect.exe, Normal and Particles Vanish.exe
 exit /b 0
 
 :error

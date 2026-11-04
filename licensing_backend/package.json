@@ -1,0 +1,12 @@
+{
+  "name": "vanishcam-license-rules",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test license_rules.test.mjs"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "5.0.0",
+    "firebase": "12.19.0"
+  }
+}
