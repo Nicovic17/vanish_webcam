@@ -23,7 +23,7 @@ For step-by-step instructions in English and Italian, see the [user guide](USER_
 
 ## Windows executables
 
-[Browse the shop](https://nicoaauriemma.vercel.app/shop) for published downloads. To build from these sources, run `BUILD_WINDOWS.bat`. It creates four standalone EXEs in `dist/`:
+[Browse the shop](https://nicoaauriemma.vercel.app/shop) for published downloads. To build from these sources, first copy `license_config.example.json` to the Git-ignored `license_config.json` and fill in the Firebase project ID and client API key. Then run `BUILD_WINDOWS.bat`. It creates four standalone EXEs in `dist/`:
 
 - `VanishCam.exe` offers Normal, Naruto, Particles, Goku and Itachi.
 - `Naruto Vanish Effect.exe` starts Naruto directly.

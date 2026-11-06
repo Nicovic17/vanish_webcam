@@ -1,0 +1,5 @@
+{
+  "projectId": "your-firebase-project-id",
+  "apiKey": "YOUR_FIREBASE_API_KEY",
+  "databaseId": "(default)"
+}
