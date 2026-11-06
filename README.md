@@ -11,7 +11,6 @@ launch asks only for your license email, then binds it to this Windows device.
 Later launches remember the email but always check Firebase again. No password
 or email verification is requested. Only license/device/session data is sent;
 the webcam feed stays local. One running instance is allowed across editions.
-For owner setup and manual activation, see [GESTIONE_LICENZE.md](GESTIONE_LICENZE.md).
 
 The Python source launched with `AVVIA_LOCALE.bat` is the local development
 version: it starts without Firebase or a license check. Packaged EXEs retain
@@ -19,7 +18,6 @@ the online license requirement. Until the server rules include a new effect,
 the licensed full EXE reports its session mode as `full`, so a valid license
 does not stop renewing while that effect runs.
 
-For step-by-step instructions in English and Italian, see the [user guide](USER_GUIDE_EN_IT.md).
 
 ## Windows executables
 

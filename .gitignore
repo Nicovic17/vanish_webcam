@@ -10,6 +10,10 @@ __pycache__/
 /dist/*
 *.exe
 
+# Keep local Markdown documents out of Git; publish only the main README.
+*.[mM][dD]
+!/README.md
+
 # Local Firebase administrator credentials and environment files.
 /license_config.json
 /vanishcam-licenses-*.json
