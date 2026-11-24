@@ -66,6 +66,14 @@ local_app\AVVIA_LOCALE.bat --mode goku
 local_app\AVVIA_LOCALE.bat --mode itachi
 ```
 
+## macOS
+
+On a Mac, double-click `AVVIA_MAC.command` or run it with the same arguments as `AVVIA_LOCALE.bat`. It creates `.venv-local` with Python 3.12 or 3.13, installs the requirements once and starts `vanish_cam.py` without a license check. Python 3.14 and later do not work yet: `pygame` has no packages for them.
+
+`requirements.txt` pins MediaPipe 1.2.3 on macOS instead of 1.0.1. With 1.0.1 every task that detects hands, a face or a gesture aborts the process while MediaPipe opens its Metal helper, so all modes close before the camera preview.
+
+Tested on an Apple Silicon Mac with macOS 26.6.2: the test suite (91 tests, 3 Windows-only skips), all five effects, and Normal Vanish with the built-in camera (background capture, the V sign and the dissolve). An Intel Mac, the other modes with a camera and OBS Virtual Camera on macOS are not tested yet. For the virtual camera, start it once in OBS 30 or later and approve the system extension in System Settings.
+
 ## Virtual camera and OBS
 
 If [OBS Studio](https://obsproject.com/) is installed, the app automatically tries to open **OBS Virtual Camera**. The terminal shows the device name. Use `AVVIA_VIRTUAL.bat` to require a virtual camera. Select **OBS Virtual Camera** in the app that will receive the video. OBS's virtual camera must be stopped while this app is producing its output.
