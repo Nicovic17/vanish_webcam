@@ -1,4 +1,6 @@
-mediapipe==1.0.1
+# 1.0.1 aborts on macOS in every task with a detector: MediaPipe fails to open its Metal helper.
+mediapipe==1.0.1; sys_platform != "darwin"
+mediapipe==1.2.3; sys_platform == "darwin"
 opencv-contrib-python>=4.14,<6
 numpy>=2.0,<3
 pyvirtualcam>=0.15,<1
