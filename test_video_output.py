@@ -166,7 +166,7 @@ class MenuTests(unittest.TestCase):
 
 
 class VideoLoopTests(unittest.TestCase):
-    def run_mock_video(self, send_error=None, gesture=("No_Hand", 0.0), mode="normal"):
+    def run_mock_video(self, send_error=None, gesture=("No_Hand", 0.0), mode="normal", mask=None):
         capture = Mock()
         frames = [np.full((24, 40, 3), color, np.uint8) for color in (10, 40, 80, 120, 160)]
         capture.read.side_effect = [(True, frame) for frame in frames]
@@ -181,7 +181,8 @@ class VideoLoopTests(unittest.TestCase):
             mocks.enter_context(patch.object(app, "create_tasks", return_value=(segmenter, recognizer)))
             opening = mocks.enter_context(patch.object(app, "open_virtual_camera", return_value=camera))
             segment = mocks.enter_context(patch.object(
-                app, "person_mask", return_value=np.ones((24, 40), np.float32),
+                app, "person_mask",
+                return_value=np.ones((24, 40), np.float32) if mask is None else mask,
             ))
             mocks.enter_context(patch.object(app, "recognize_gesture", return_value=gesture))
             times = (0, 0, 0.1, 4.1, 4.3, 4.35, 5.0, 5.02, 8.2, 8.23)
@@ -207,7 +208,7 @@ class VideoLoopTests(unittest.TestCase):
             camera.close.assert_called_once()
             destroy.assert_called_once()
             if mode == "particles":
-                segment.assert_called_once()  # Una sola acquisizione della sagoma.
+                self.assertGreaterEqual(segment.call_count, 1)  # La sagoma è seguita durante l'effetto.
         return frames, camera, displayed
 
     def test_preview_and_virtual_output_are_clean_in_all_phases(self):
@@ -235,6 +236,14 @@ class VideoLoopTests(unittest.TestCase):
         np.testing.assert_array_equal(displayed[4], frames[1])
         for sent, preview in zip(camera.send.call_args_list, displayed):
             np.testing.assert_array_equal(sent.args[0], preview)
+
+    def test_vanished_room_follows_the_camera_outside_the_person(self):
+        half = np.zeros((24, 40), np.float32)
+        half[:, :20] = 1.0
+        frames, camera, displayed = self.run_mock_video(mask=half)
+        # Sparito: the stored room where the person is, the live camera everywhere else.
+        np.testing.assert_array_equal(displayed[4][:, :20], frames[1][:, :20])
+        np.testing.assert_array_equal(displayed[4][:, 20:], frames[4][:, 20:])
 
     def test_all_devices_close_on_send_error(self):
         self.run_mock_video(send_error=RuntimeError("send failed"))
@@ -288,7 +297,7 @@ class VideoLoopTests(unittest.TestCase):
             with ExitStack() as resources:
                 self.assertEqual(app.run_camera(arguments(mode="goku"), resources, "goku"), 0)
 
-        self.assertEqual(masks.call_count, 2)
+        self.assertGreaterEqual(masks.call_count, 2)  # La sagoma è seguita anche da invisibile.
         sound_factory.assert_called_once_with(app.TELEPORT_SOUND_PATH)
         self.assertEqual(sound.play.call_count, 2)
         countdown = [call.args[0] for call in printed.call_args_list
@@ -299,9 +308,10 @@ class VideoLoopTests(unittest.TestCase):
             "[Goku] Riapparizione tra 1...",
             "[Goku] Riapparizione!",
         ])
+        gone = np.where(mask[..., None] > 0, frames[1], frames[16])  # Stanza viva, persona tolta.
         np.testing.assert_array_equal(displayed[2], frames[2])
         np.testing.assert_array_equal(displayed[14], frames[1])
-        np.testing.assert_array_equal(displayed[16], frames[1])
+        np.testing.assert_array_equal(displayed[16], gone)
         np.testing.assert_array_equal(displayed[29][40, 60], frames[29][40, 60])
         for sent, preview in zip(camera.send.call_args_list, displayed):
             np.testing.assert_array_equal(sent.args[0], preview)

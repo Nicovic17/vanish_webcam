@@ -109,6 +109,15 @@ class ItachiAnimationTests(unittest.TestCase):
             late_without_eyes = effect.render(background, 3.0)
         self.assertTrue(np.array_equal(late, late_without_eyes))
 
+    def test_ink_covers_a_live_frame_while_the_person_is_invisible(self):
+        person, background, mask = scene()
+        effect = ItachiCrowEffect(person, mask)
+        stored = effect._blood_background(background, EFFECT_SECONDS)
+        np.testing.assert_allclose(effect.blood_view(background), stored, atol=2)
+        live = np.full_like(background, 255)
+        self.assertFalse(np.array_equal(effect.blood_view(live), stored))
+        self.assertFalse(np.array_equal(effect.blood_view(live), live))
+
     def test_reverse_animation_reconstructs_person(self):
         person, background, mask = scene()
         effect = ItachiCrowEffect(person, mask)

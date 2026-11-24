@@ -146,11 +146,51 @@ class ImmediateAnimationTests(unittest.TestCase):
                 self.assertEqual(state.phase, "ready")
                 self.assertIsNone(state.vanish_started)
 
-    def test_only_ready_phase_responds(self):
-        for phase in ("calibrating", "vanishing", "vanished"):
+    def test_only_ready_or_vanished_phases_respond(self):
+        for phase in ("calibrating", "vanishing", "appearing"):
             state = AppState(phase=phase)
             self.assertFalse(start_vanish_on_gesture(state, "Victory", 0.9, 12.5))
             self.assertEqual(state.phase, phase)
+
+    def test_the_same_gesture_brings_the_person_back(self):
+        state = AppState(phase="vanished")
+        self.assertTrue(start_vanish_on_gesture(state, "Victory", 0.9, 20.0))
+        self.assertEqual(state.phase, "appearing")
+        self.assertEqual(state.vanish_started, 20.0)
+
+    def test_a_gesture_still_held_from_the_vanish_does_not_bounce_back(self):
+        state = AppState(phase="ready")
+        self.assertTrue(start_vanish_on_gesture(state, "Victory", 0.9, 12.5))
+        state.phase = "vanished"
+        self.assertFalse(start_vanish_on_gesture(state, "Victory", 0.9, 13.0))  # Still held.
+        start_vanish_on_gesture(state, "No_Hand", 0.0, 13.1)
+        self.assertFalse(start_vanish_on_gesture(state, "Victory", 0.9, 13.3))  # Let go for less than a moment.
+        start_vanish_on_gesture(state, "No_Hand", 0.0, 13.5)
+        start_vanish_on_gesture(state, "No_Hand", 0.0, 13.85)
+        self.assertTrue(start_vanish_on_gesture(state, "Victory", 0.9, 14.0))
+        self.assertEqual(state.phase, "appearing")
+
+    def test_joined_palms_bring_the_person_back(self):
+        state = AppState(phase="vanished")
+        self.assertTrue(app.start_naruto_on_join(state, True, 20.0))
+        self.assertEqual(state.phase, "appearing")
+
+
+class LiveRoomDissolveTests(unittest.TestCase):
+    def test_the_room_stays_live_around_the_dissolving_person(self):
+        frame = np.full((60, 80, 3), (10, 200, 30), np.uint8)  # The camera now.
+        background = np.full_like(frame, (200, 20, 20))  # The empty room stored at start.
+        mask = np.zeros((60, 80), np.float32)
+        mask[10:50, 30:50] = 1.0
+        field, noise = app.make_dissolve_fields(60, 80)
+        gone = app.apply_dissolve(frame, background, mask, 1.0, field, noise)
+        np.testing.assert_array_equal(gone[5, 5], frame[5, 5])
+        np.testing.assert_array_equal(gone[30, 40], background[30, 40])
+        midway = app.apply_dissolve(frame, background, mask, 0.5, field, noise)
+        np.testing.assert_array_equal(midway[5, 5], frame[5, 5])
+        np.testing.assert_array_equal(
+            app.apply_dissolve(frame, background, mask, 0.0, field, noise), frame
+        )
 
 
 class MultiViewTests(unittest.TestCase):

@@ -471,14 +471,26 @@ class ItachiCrowEffect:
             fine = cv2.resize(fine, (self.width, self.height), interpolation=cv2.INTER_CUBIC)
             pattern = np.clip(coarse * .66 + fine * .34, 0, 1)
             red_alpha = (.60 + .20 * pattern)[:, :, None]
+            ink = np.clip((.36 - pattern) * 1.25, 0, .30)[:, :, None]
             crimson = np.array((15, 10, 200), np.float32)
             colored = background.astype(np.float32) * (1 - red_alpha) + crimson * red_alpha
-            ink = np.clip((.36 - pattern) * 1.25, 0, .30)[:, :, None]
             colored = colored * (1 - ink) + np.array((9, 10, 17), np.float32) * ink
             self._blood_frame = np.clip(colored, 0, 255).astype(np.uint8)
+            # The same ink as one weight and one offset per pixel, for a live frame each time.
+            self._ink_weight = np.repeat(((1 - red_alpha) * (1 - ink) * 255).round().astype(np.uint8), 3, axis=2)
+            self._ink_offset = (crimson * red_alpha * (1 - ink) + np.array((9, 10, 17), np.float32) * ink).round().astype(np.uint8)
         if strength >= 1:
             return self._blood_frame.copy()
         return cv2.addWeighted(background, 1.0 - strength, self._blood_frame, strength, 0)
+
+    def blood_view(self, frame: np.ndarray) -> np.ndarray:
+        """The same ink over a live frame, for as long as the person stays invisible.
+
+        Integer math keeps it under a millisecond; it matches the ink above to within two levels.
+        """
+        if self._blood_frame is None:
+            self._blood_background(frame, EFFECT_SECONDS)
+        return cv2.add(cv2.multiply(frame, self._ink_weight, scale=1 / 255.0), self._ink_offset)
 
     def _draw_sharingan(self, frame: np.ndarray, timeline: float) -> None:
         opacity = (_smoothstep(.28, .66, timeline)

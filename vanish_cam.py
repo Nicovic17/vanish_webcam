@@ -107,6 +107,8 @@ MODEL_URLS = {
 CALIBRATION_SECONDS = 4.0
 BACKGROUND_SAMPLE_SECONDS = 0.55
 VANISH_SECONDS = 3.6
+APPEAR_SECONDS = 1.0
+RELEASE_SECONDS = 0.3
 GESTURE_INTERVAL_SECONDS = 0.14
 
 
@@ -117,6 +119,14 @@ class AppState:
     vanish_started: float | None = None
     last_gesture_check: float = 0.0
     fullscreen: bool = False
+    gesture_armed: bool = True
+    gesture_free_since: float | None = None
+
+    def gesture_due(self, now: float, interval: float) -> bool:
+        if now - self.last_gesture_check < interval:
+            return False
+        self.last_gesture_check = now
+        return True
 
 
 def positive_fps(value: str) -> float:
@@ -634,11 +644,13 @@ def person_mask(
 
 
 def alpha_composite(person: np.ndarray, background: np.ndarray, alpha: np.ndarray) -> np.ndarray:
-    alpha_3 = alpha[:, :, None]
-    return (
-        person.astype(np.float32) * alpha_3
-        + background.astype(np.float32) * (1.0 - alpha_3)
-    ).astype(np.uint8)
+    # Whole-frame math in uint8: about three times faster than the float version and the same
+    # to within two levels on a feathered edge.
+    weight = np.repeat((alpha * 255).astype(np.uint8)[:, :, None], 3, axis=2)
+    return cv2.add(
+        cv2.multiply(person, weight, scale=1 / 255.0),
+        cv2.multiply(background, cv2.bitwise_not(weight), scale=1 / 255.0),
+    )
 
 
 def apply_dissolve(
@@ -649,14 +661,16 @@ def apply_dissolve(
     field: np.ndarray,
     sparkle_noise: np.ndarray,
 ) -> np.ndarray:
+    """Dissolve the person over the stored empty room; the rest of the frame stays live."""
     if progress <= 0.002:
-        return alpha_composite(frame, background, mask)
+        return frame
+    erased = alpha_composite(background, frame, mask)
     if progress >= 0.999:
-        return background.copy()
+        return erased
 
     points = cv2.findNonZero((mask > 0.01).astype(np.uint8))
     if points is None:
-        return background.copy()
+        return erased
     x, y, width, height = cv2.boundingRect(points)
     left, top = max(0, x - 18), max(0, y - 18)
     right = min(mask.shape[1], x + width + 18)
@@ -668,7 +682,7 @@ def apply_dissolve(
     eased = ease_in_out_cubic(progress)
     survival = smoothstep(eased - 0.055, eased + 0.055, field)
     alpha = mask * survival
-    output = alpha_composite(frame[area], background[area], alpha)
+    output = alpha_composite(frame[area], erased[area], alpha)
     edge = (
         (np.abs(field - eased) < 0.018)
         & (mask > 0.48)
@@ -683,7 +697,7 @@ def apply_dissolve(
         0,
         255,
     ).astype(np.uint8)
-    canvas = background.copy()
+    canvas = erased
     canvas[area] = result
     return canvas
 
@@ -904,19 +918,34 @@ def recognize_gesture(
     return classify_gesture_result(recognizer.recognize_for_video(image, timestamp_ms), image)
 
 
+def arm_on_release(state: AppState, present: bool, now: float) -> None:
+    """The gesture counts again only after it has been let go for a moment."""
+    if present:
+        state.gesture_free_since = None
+    elif state.gesture_free_since is None:
+        state.gesture_free_since = now
+    elif now - state.gesture_free_since >= RELEASE_SECONDS:
+        state.gesture_armed = True
+
+
 def start_vanish_on_gesture(state: AppState, name: str, score: float, now: float) -> bool:
-    """Avvia la dissolvenza al primo riconoscimento affidabile della V."""
-    if state.phase == "ready" and name == "Victory" and score >= 0.62:
-        state.phase = "vanishing"
+    """Start the dissolve on the first solid V, or the return while the person is invisible."""
+    present = name == "Victory" and score >= 0.62
+    arm_on_release(state, present, now)
+    if state.phase in ("ready", "vanished") and state.gesture_armed and present:
+        state.phase = "vanishing" if state.phase == "ready" else "appearing"
         state.vanish_started = now
+        state.gesture_armed = False
         return True
     return False
 
 
 def start_naruto_on_join(state: AppState, joined: bool, now: float) -> bool:
-    if state.phase == "ready" and joined:
-        state.phase = "naruto_vanishing"
+    arm_on_release(state, joined, now)
+    if state.phase in ("ready", "vanished") and state.gesture_armed and joined:
+        state.phase = "naruto_vanishing" if state.phase == "ready" else "appearing"
         state.vanish_started = now
+        state.gesture_armed = False
         return True
     return False
 
@@ -1023,7 +1052,6 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str, licens
     sparkle_noise: np.ndarray | None = None
     log_anchor: tuple[int, int, int] | None = None
     log_cache: dict[int, np.ndarray] = {}
-    vanished_frame: np.ndarray | None = None
     particle_effect: ParticleEffect | None = None
     itachi_effect: ItachiCrowEffect | None = None
     itachi_gate = ItachiGestureGate() if mode == "itachi" else None
@@ -1047,6 +1075,34 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str, licens
         if mode == "itachi":
             print("[Itachi] Tocca le due mani davanti al centro del petto. "
                   "Rilascia il gesto e ripetilo per riapparire.")
+        else:
+            print("[Webcam] Per riapparire ripeti il gesto: prima rilascialo per un attimo.")
+
+    def look_for_gesture(image, elapsed_ms: int, now: float) -> bool:
+        """One check of the mode's gesture. True when it started the vanish or the return."""
+        nonlocal last_gesture_report
+        if mode != "naruto":
+            name, score = recognize_gesture(recognizer, image, elapsed_ms)
+            if args.gesture_debug and now - last_gesture_report >= 1.0:
+                print(
+                    f"[Gesto] {name}, valore={score:.2f}, "
+                    f"ritaglio={recognizer.preferred_crop or 'full'}, "
+                    f"rotazione={recognizer.preferred_rotation or 0}"
+                )
+                last_gesture_report = now
+            return start_vanish_on_gesture(state, name, score, now)
+        joined = recognizer.recognize_joined_hands(image, elapsed_ms)
+        if args.gesture_debug and now - last_gesture_report >= 1.0:
+            print(f"[Mani] rilevate={recognizer.last_hand_count}, "
+                  f"unite={joined}, vista={recognizer.preferred_view or 'full'}")
+            last_gesture_report = now
+        if state.phase not in ("ready", "vanished"):
+            arm_on_release(state, joined, now)  # While the effect runs, only note when the palms part.
+            return False
+        if start_naruto_on_join(state, joined, time.perf_counter()):
+            vanish_sound.play()
+            return True
+        return False
 
     try:
         while True:
@@ -1065,7 +1121,8 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str, licens
                 virtual_camera_initialized = True
                 if virtual_camera is not None:
                     resources.callback(virtual_camera.close)
-            if mode == "normal" and (dissolve_field is None or dissolve_field.shape != (height, width)):
+            if mode in ("normal", "particles", "naruto") and (
+                    dissolve_field is None or dissolve_field.shape != (height, width)):
                 dissolve_field, sparkle_noise = make_dissolve_fields(height, width)
             now = time.perf_counter()
 
@@ -1093,7 +1150,6 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str, licens
                         appearing = state.phase == "vanished"
                         state.phase = "itachi_appearing" if appearing else "itachi_disappearing"
                         state.vanish_started = now
-                        vanished_frame = None
                         print("[Itachi] Ricomposizione dei corvi." if appearing
                               else "[Itachi] Dispersione in corvi.")
 
@@ -1161,7 +1217,6 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str, licens
                 display = goku_effect.render(background, age, appearing)
                 if age >= TELEPORT_SECONDS:
                     state.phase = "ready" if appearing else "vanished"
-                    vanished_frame = None if appearing else background.copy()
 
             elif mode == "itachi" and state.phase in ("itachi_disappearing", "itachi_appearing"):
                 appearing = state.phase == "itachi_appearing"
@@ -1169,56 +1224,68 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str, licens
                 display = itachi_effect.render(background, age, appearing)
                 if age >= ITACHI_SECONDS:
                     state.phase = "ready" if appearing else "vanished"
-                    vanished_frame = None if appearing else display
-                    itachi_effect = None
+                    if appearing:
+                        itachi_effect = None  # The crows are gone; the ink stays while the person is invisible.
 
             elif state.phase == "vanished":
-                if vanished_frame is None:
-                    vanished_frame = background.copy()
-                    if mode == "naruto" and log_anchor is not None:
-                        overlay_log(vanished_frame, log_sprite, landed_log_anchor(log_anchor, height),
-                                    cache=log_cache)
-                display = vanished_frame
+                # The room stays live: only the person is cut out of the camera picture.
+                if last_mask is None or now - last_mask_at >= 0.05:
+                    if mp_image is None:
+                        rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
+                        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                    last_mask = person_mask(segmenter, mp_image, elapsed_ms, width, height)
+                    last_mask_at = now
+                display = alpha_composite(background, camera_frame, last_mask)
+                if mode == "naruto" and log_anchor is not None:
+                    overlay_log(display, log_sprite, landed_log_anchor(log_anchor, height),
+                                cache=log_cache)
+                if mode == "itachi" and itachi_effect is not None:
+                    display = itachi_effect.blood_view(display)
+                if (mode not in ("goku", "itachi")
+                        and state.gesture_due(
+                            now, 0.08 if mode == "naruto" else GESTURE_INTERVAL_SECONDS)):
+                    if mp_image is None:
+                        rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
+                        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                    if look_for_gesture(mp_image, elapsed_ms, now):
+                        print("[Webcam] Riapparizione.")
+
+            elif state.phase == "appearing":
+                if last_mask is None or now - last_mask_at >= 0.05:
+                    if mp_image is None:
+                        rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
+                        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+                    last_mask = person_mask(segmenter, mp_image, elapsed_ms, width, height)
+                    last_mask_at = now
+                age = time.perf_counter() - state.vanish_started
+                display = apply_dissolve(
+                    camera_frame, background, last_mask, 1.0 - min(1.0, age / APPEAR_SECONDS),
+                    dissolve_field, sparkle_noise,
+                )
+                if age >= APPEAR_SECONDS:
+                    state.phase = "ready"
+                    log_anchor = None
+                    last_mask = None
+                    last_mask_at = float("-inf")
+                    particle_effect = None
 
             else:
                 mask = last_mask
-                if (
-                    state.phase == "ready"
-                    and mode not in ("goku", "itachi")
-                    and now - state.last_gesture_check >=
-                    (0.08 if mode == "naruto" else GESTURE_INTERVAL_SECONDS)
-                ):
-                    state.last_gesture_check = now
+                # While ready, the gesture starts the vanish. While the effect runs, the checks
+                # only learn when it is let go, so a repeat shown too early does not count.
+                if (state.phase in ("ready", "vanishing", "naruto_vanishing")
+                        and mode not in ("goku", "itachi")
+                        and state.gesture_due(
+                            now, 0.08 if mode == "naruto" else GESTURE_INTERVAL_SECONDS)):
                     rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
                     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-                    if mode != "naruto":
-                        name, score = recognize_gesture(recognizer, mp_image, elapsed_ms)
-                        if args.gesture_debug and now - last_gesture_report >= 1.0:
-                            print(
-                                f"[Gesto] {name}, valore={score:.2f}, "
-                                f"ritaglio={recognizer.preferred_crop or 'full'}, "
-                                f"rotazione={recognizer.preferred_rotation or 0}"
-                            )
-                            last_gesture_report = now
-                        start_vanish_on_gesture(state, name, score, now)
-                    else:
-                        joined = recognizer.recognize_joined_hands(mp_image, elapsed_ms)
-                        if args.gesture_debug and now - last_gesture_report >= 1.0:
-                            print(f"[Mani] rilevate={recognizer.last_hand_count}, "
-                                  f"unite={joined}, vista={recognizer.preferred_view or 'full'}")
-                            last_gesture_report = now
-                        if start_naruto_on_join(state, joined, time.perf_counter()):
-                            vanish_sound.play()
+                    if look_for_gesture(mp_image, elapsed_ms, now):
+                        print("[Webcam] Sparizione.")
 
                 if state.phase in ("vanishing", "naruto_vanishing"):
-                    # Normal tracks the silhouette at 20 Hz. Particles captures
-                    # it once; Naruto needs it only while the person is visible.
-                    needs_mask = (
-                        (mode == "normal" and (mask is None or now - last_mask_at >= 0.05))
-                        or (mode == "particles" and particle_effect is None)
-                        or (mode == "naruto" and (log_anchor is None or now - state.vanish_started < 0.13))
-                    )
-                    if needs_mask:
+                    # The silhouette is tracked at 20 Hz so the live person stays erased
+                    # while the effect runs over the stored room.
+                    if mask is None or now - last_mask_at >= 0.05:
                         if mp_image is None:
                             rgb = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2RGB)
                             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
@@ -1227,23 +1294,22 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str, licens
                         last_mask_at = now
                     if mode == "naruto" and log_anchor is None:
                         log_anchor = substitution_anchor(mask)
+                    erased = alpha_composite(background, camera_frame, mask)
 
                 if mode == "naruto" and state.phase == "naruto_vanishing":
                     age = max(0.04, time.perf_counter() - state.vanish_started)
                     display = render_substitution(
-                        camera_frame, background, mask, log_sprite, log_anchor, age, log_cache
+                        camera_frame, erased, mask, log_sprite, log_anchor, age, log_cache
                     )
                     if age >= EFFECT_SECONDS:
                         state.phase = "vanished"
-                        vanished_frame = display
                 elif mode == "particles" and state.phase == "vanishing":
                     if particle_effect is None:
                         particle_effect = ParticleEffect(camera_frame, mask)
                     age = time.perf_counter() - state.vanish_started
-                    display = particle_effect.render(background, age)
+                    display = particle_effect.render(erased, age)
                     if age >= PARTICLE_SECONDS:
                         state.phase = "vanished"
-                        vanished_frame = display
                 elif state.phase == "ready":
                     display = camera_frame
                 else:
@@ -1257,8 +1323,6 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str, licens
                     display = apply_dissolve(
                         camera_frame, background, mask, progress, dissolve_field, sparkle_noise
                     )
-                    if state.phase == "vanished":
-                        vanished_frame = display
 
             if license_session is not None:
                 license_session.ensure_valid()
@@ -1273,10 +1337,11 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str, licens
                 state.phase = "calibrating"
                 state.calibration_started = now
                 state.vanish_started = None
+                state.gesture_armed = True
+                state.gesture_free_since = None
                 log_anchor = None
                 last_mask = None
                 last_mask_at = float("-inf")
-                vanished_frame = None
                 particle_effect = None
                 itachi_effect = None
                 if itachi_gate is not None:
@@ -1300,11 +1365,9 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str, licens
                     else:
                         state.phase = "itachi_appearing"
                         state.vanish_started = time.perf_counter()
-                        vanished_frame = None
                 elif background is not None and mode not in ("goku", "itachi"):
-                    state.phase = "ready"
-                    state.vanish_started = None
-                    vanished_frame = None
+                    state.phase = "appearing" if state.phase == "vanished" else "ready"
+                    state.vanish_started = time.perf_counter()
                     log_anchor = None
                     last_mask = None
                     last_mask_at = float("-inf")
@@ -1326,7 +1389,6 @@ def run_camera(args: argparse.Namespace, resources: ExitStack, mode: str, licens
                 if mode == "naruto":
                     vanish_sound.play()
                     log_anchor = None
-                vanished_frame = None
                 particle_effect = None
             elif key == ord("f"):
                 state.fullscreen = not state.fullscreen
