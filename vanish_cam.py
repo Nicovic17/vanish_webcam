@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import queue
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -404,7 +406,23 @@ def download_models(mode: str = "normal") -> None:
             ) from error
 
 
-def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
+class SizedCapture:
+    """Serve every frame at the size the app asked the camera for."""
+
+    def __init__(self, capture, size: tuple[int, int]):
+        self.capture, self.size = capture, size
+
+    def read(self) -> tuple[bool, np.ndarray]:
+        ok, frame = self.capture.read()
+        if ok and frame.shape[1::-1] != self.size:
+            frame = cv2.resize(frame, self.size, interpolation=cv2.INTER_LINEAR)
+        return ok, frame
+
+    def __getattr__(self, name):
+        return getattr(self.capture, name)
+
+
+def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture | SizedCapture:
     if platform.system() == "Windows":
         capture = cv2.VideoCapture(index, cv2.CAP_DSHOW)
         if not capture.isOpened():
@@ -421,13 +439,67 @@ def open_camera(index: int, width: int, height: int) -> cv2.VideoCapture:
     capture.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     capture.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
     capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    given = (capture.get(cv2.CAP_PROP_FRAME_WIDTH), capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if given[0] > width and given[1] > height:
+        # AVFoundation keeps the camera format, 1280x720 on a MacBook, whatever was asked.
+        capture = SizedCapture(capture, (width, height))
     return capture
 
 
-def create_tasks(mode: str = "normal") -> tuple[
-    vision.ImageSegmenter,
-    MultiViewGestureRecognizer | MultiViewHandLandmarker | GokuPoseRecognizer | ItachiPoseRecognizer,
-]:
+class AsyncRecognizer:
+    """Run a recogniser on its own thread so a slow check never stalls the video.
+
+    The video thread hands over the newest frame and goes on with the previous answer. A frame
+    that arrives while a check is running replaces the waiting one instead of queuing up.
+    """
+
+    FIRST_ANSWER = {
+        "recognize_gesture": ("No_Hand", 0.0), "recognize_joined_hands": False, "recognize_pose": False,
+    }
+
+    def __init__(self, recognizer):
+        self.recognizer = recognizer
+        self.answers = dict(self.FIRST_ANSWER)
+        self.pending = queue.Queue(maxsize=1)
+        self.failure = None
+        self.thread = threading.Thread(target=self._work, name="recogniser", daemon=True)
+        self.thread.start()
+
+    def __getattr__(self, name):
+        attribute = getattr(self.recognizer, name)
+        if name.startswith("_") or not callable(attribute):
+            return attribute
+
+        def later(*arguments):
+            if self.failure:
+                raise self.failure
+            try:
+                self.pending.get_nowait()
+            except queue.Empty:
+                pass
+            self.pending.put((name, arguments))
+            return self.answers.get(name)
+
+        return later
+
+    def _work(self):
+        while True:
+            item = self.pending.get()
+            if item is None:
+                return
+            name, arguments = item
+            try:
+                self.answers[name] = getattr(self.recognizer, name)(*arguments)
+            except Exception as error:  # Show it on the video thread instead of ending silently.
+                self.failure = error
+
+    def close(self):
+        self.pending.put(None)
+        self.thread.join(timeout=5)
+        self.recognizer.close()
+
+
+def create_tasks(mode: str = "normal") -> tuple[vision.ImageSegmenter, AsyncRecognizer]:
     segmenter_options = vision.ImageSegmenterOptions(
         base_options=python.BaseOptions(model_asset_path=str(SEGMENTER_MODEL)),
         running_mode=vision.RunningMode.VIDEO,
@@ -468,7 +540,7 @@ def create_tasks(mode: str = "normal") -> tuple[
         except Exception:
             segmenter.close()
             raise
-        return segmenter, GokuPoseRecognizer(hands, face, fallback_hands)
+        return segmenter, AsyncRecognizer(GokuPoseRecognizer(hands, face, fallback_hands))
     if mode in ("naruto", "itachi"):
         if not HAND_MODEL.is_file():
             raise RuntimeError(f"Modello delle mani non trovato: {HAND_MODEL}")
@@ -513,8 +585,8 @@ def create_tasks(mode: str = "normal") -> tuple[
         segmenter.close()
         raise
     if mode == "itachi":
-        return segmenter, ItachiPoseRecognizer(primary, alternate)
-    return segmenter, wrapper_class(primary, alternate)
+        return segmenter, AsyncRecognizer(ItachiPoseRecognizer(primary, alternate))
+    return segmenter, AsyncRecognizer(wrapper_class(primary, alternate))
 
 
 def smoothstep(edge0: float, edge1: float, values: np.ndarray) -> np.ndarray:
@@ -823,11 +895,11 @@ class MultiViewHandLandmarker:
 
 
 def recognize_gesture(
-    recognizer: MultiViewGestureRecognizer,
+    recognizer: MultiViewGestureRecognizer | AsyncRecognizer,
     image: mp.Image,
     timestamp_ms: int,
 ) -> tuple[str, float]:
-    if isinstance(recognizer, MultiViewGestureRecognizer):
+    if hasattr(recognizer, "recognize_gesture"):
         return recognizer.recognize_gesture(image, timestamp_ms)
     return classify_gesture_result(recognizer.recognize_for_video(image, timestamp_ms), image)
 
