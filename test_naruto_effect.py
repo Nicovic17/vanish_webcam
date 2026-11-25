@@ -167,7 +167,8 @@ class NarutoVideoLoopTests(unittest.TestCase):
         self.assertTrue(np.any(preview[2] != frames[2]))
         self.assertTrue(np.any(preview[3] != frames[3]))
         self.assertTrue(np.any(preview[4] != frames[1]))  # Tronco persistente.
-        recognizer.recognize_joined_hands.assert_called_once()
+        # Il gesto è osservato anche durante l'effetto, per capire quando viene rilasciato.
+        self.assertGreaterEqual(recognizer.recognize_joined_hands.call_count, 1)
         sound.play.assert_called_once()
         sound.close.assert_called_once()
 

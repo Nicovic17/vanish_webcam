@@ -1,11 +1,16 @@
+import threading
+import time
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+import cv2
 import numpy as np
 import mediapipe as mp
 
+from local_app import vanish_cam as app
 from local_app.vanish_cam import (
-    AppState, MultiViewGestureRecognizer, recognize_gesture, start_vanish_on_gesture,
+    AppState, AsyncRecognizer, MultiViewGestureRecognizer, recognize_gesture, start_vanish_on_gesture,
     victory_landmark_score,
 )
 
@@ -141,11 +146,51 @@ class ImmediateAnimationTests(unittest.TestCase):
                 self.assertEqual(state.phase, "ready")
                 self.assertIsNone(state.vanish_started)
 
-    def test_only_ready_phase_responds(self):
-        for phase in ("calibrating", "vanishing", "vanished"):
+    def test_only_ready_or_vanished_phases_respond(self):
+        for phase in ("calibrating", "vanishing", "appearing"):
             state = AppState(phase=phase)
             self.assertFalse(start_vanish_on_gesture(state, "Victory", 0.9, 12.5))
             self.assertEqual(state.phase, phase)
+
+    def test_the_same_gesture_brings_the_person_back(self):
+        state = AppState(phase="vanished")
+        self.assertTrue(start_vanish_on_gesture(state, "Victory", 0.9, 20.0))
+        self.assertEqual(state.phase, "appearing")
+        self.assertEqual(state.vanish_started, 20.0)
+
+    def test_a_gesture_still_held_from_the_vanish_does_not_bounce_back(self):
+        state = AppState(phase="ready")
+        self.assertTrue(start_vanish_on_gesture(state, "Victory", 0.9, 12.5))
+        state.phase = "vanished"
+        self.assertFalse(start_vanish_on_gesture(state, "Victory", 0.9, 13.0))  # Still held.
+        start_vanish_on_gesture(state, "No_Hand", 0.0, 13.1)
+        self.assertFalse(start_vanish_on_gesture(state, "Victory", 0.9, 13.3))  # Let go for less than a moment.
+        start_vanish_on_gesture(state, "No_Hand", 0.0, 13.5)
+        start_vanish_on_gesture(state, "No_Hand", 0.0, 13.85)
+        self.assertTrue(start_vanish_on_gesture(state, "Victory", 0.9, 14.0))
+        self.assertEqual(state.phase, "appearing")
+
+    def test_joined_palms_bring_the_person_back(self):
+        state = AppState(phase="vanished")
+        self.assertTrue(app.start_naruto_on_join(state, True, 20.0))
+        self.assertEqual(state.phase, "appearing")
+
+
+class LiveRoomDissolveTests(unittest.TestCase):
+    def test_the_room_stays_live_around_the_dissolving_person(self):
+        frame = np.full((60, 80, 3), (10, 200, 30), np.uint8)  # The camera now.
+        background = np.full_like(frame, (200, 20, 20))  # The empty room stored at start.
+        mask = np.zeros((60, 80), np.float32)
+        mask[10:50, 30:50] = 1.0
+        field, noise = app.make_dissolve_fields(60, 80)
+        gone = app.apply_dissolve(frame, background, mask, 1.0, field, noise)
+        np.testing.assert_array_equal(gone[5, 5], frame[5, 5])
+        np.testing.assert_array_equal(gone[30, 40], background[30, 40])
+        midway = app.apply_dissolve(frame, background, mask, 0.5, field, noise)
+        np.testing.assert_array_equal(midway[5, 5], frame[5, 5])
+        np.testing.assert_array_equal(
+            app.apply_dissolve(frame, background, mask, 0.0, field, noise), frame
+        )
 
 
 class MultiViewTests(unittest.TestCase):
@@ -219,6 +264,76 @@ class MultiViewTests(unittest.TestCase):
         calls.clear()
         self.assertEqual(recognize_gesture(detector, self.image, 1280)[0], "Victory")
         self.assertEqual(calls, [(37, 24)])
+
+
+class SizedCaptureTests(unittest.TestCase):
+    def camera(self, width, height):
+        camera = Mock()
+        camera.get.side_effect = lambda prop: {
+            cv2.CAP_PROP_FRAME_WIDTH: width, cv2.CAP_PROP_FRAME_HEIGHT: height,
+        }[prop]
+        camera.read.return_value = (True, np.zeros((720, 1280, 3), np.uint8))
+        return camera
+
+    def test_frames_are_brought_down_to_the_requested_size(self):
+        camera = self.camera(1280.0, 720.0)
+        with patch.object(app.cv2, "VideoCapture", return_value=camera):
+            capture = app.open_camera(0, 960, 540)
+        self.assertEqual(capture.read()[1].shape, (540, 960, 3))
+        capture.release()
+        camera.release.assert_called_once()
+
+    def test_a_camera_that_honours_or_undershoots_the_size_is_left_alone(self):
+        for width, height in ((960.0, 540.0), (640.0, 480.0)):
+            with self.subTest(width=width):
+                camera = self.camera(width, height)
+                with patch.object(app.cv2, "VideoCapture", return_value=camera):
+                    self.assertIs(app.open_camera(0, 960, 540), camera)
+
+
+class AsyncRecognizerTests(unittest.TestCase):
+    def test_video_thread_never_waits_and_the_newest_frame_wins(self):
+        started, release = threading.Event(), threading.Event()
+
+        def check(image, timestamp_ms):
+            started.set()
+            release.wait(2)
+            return True
+
+        recognizer = Mock(last_hand_count=2)
+        recognizer.recognize_pose.side_effect = check
+        proxy = AsyncRecognizer(recognizer)
+        try:
+            self.assertIs(proxy.recognize_pose(None, 1000), False)  # Neutral answer until a check ends.
+            self.assertTrue(started.wait(2))
+            self.assertIs(proxy.recognize_pose(None, 1200), False)  # Never waits for the running check.
+            self.assertIs(proxy.recognize_pose(None, 1400), False)  # The newer frame replaces 1200.
+            self.assertEqual(proxy.last_hand_count, 2)
+            release.set()
+            deadline = time.monotonic() + 2
+            while proxy.answers["recognize_pose"] is False and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertIs(proxy.recognize_pose(None, 1600), True)  # A finished answer is served at once.
+        finally:
+            release.set()
+            proxy.close()
+        self.assertEqual(
+            [call.args[1] for call in recognizer.recognize_pose.call_args_list], [1000, 1400, 1600]
+        )
+
+    def test_a_failed_check_is_raised_on_the_video_thread(self):
+        recognizer = Mock()
+        recognizer.recognize_joined_hands.side_effect = RuntimeError("model stopped")
+        proxy = AsyncRecognizer(recognizer)
+        try:
+            self.assertIs(proxy.recognize_joined_hands(None, 1000), False)
+            deadline = time.monotonic() + 2
+            while proxy.failure is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            with self.assertRaisesRegex(RuntimeError, "model stopped"):
+                proxy.recognize_joined_hands(None, 1200)
+        finally:
+            proxy.close()
 
 
 if __name__ == "__main__":
